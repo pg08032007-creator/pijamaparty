@@ -14,9 +14,12 @@
       if (savedTheme === "light") document.querySelector('meta[name="theme-color"]').setAttribute("content", "#f3f4f8");
     } catch (e) { document.documentElement.setAttribute("data-theme", "dark"); }
   </script>
+  <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="preconnect" href="https://sewzespbdntxnpcaauhl.supabase.co" crossorigin>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <link rel="stylesheet" href="style.css">
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" defer></script>
 </head>
 
 <body>
