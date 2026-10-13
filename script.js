@@ -419,10 +419,34 @@ document.addEventListener("DOMContentLoaded", () => {
     return `${(bytes / 1024 / 1024).toFixed(1).replace(".", ",")} MB`;
   }
 
+  // Reduz fotos grandes (câmera do celular: 4–8 MB) antes de enviar: sobe e carrega muito mais rápido.
+  async function compressImage(file, maxSide = 1600, quality = 0.82) {
+    try {
+      if (!isImageFile(file) || /gif|svg/i.test(file.type || "") || !window.createImageBitmap) return file;
+      const bmp = await createImageBitmap(file);
+      const scale = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
+      if (scale === 1 && file.size < 350 * 1024) { bmp.close?.(); return file; }
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(bmp.width * scale));
+      canvas.height = Math.max(1, Math.round(bmp.height * scale));
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#fff";                       // PNG com fundo transparente não vira preto no JPEG
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+      bmp.close?.();
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", quality));
+      if (!blob || blob.size >= file.size) return file;
+      return new File([blob], (file.name || "foto").replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" });
+    } catch (e) {
+      return file;
+    }
+  }
+
   // Envia para o Storage (bucket "avatars", o mesmo já usado por perfis e posts).
   // Foto: se o Storage falhar, cai para uma versão reduzida (DataURL). Vídeo: precisa do Storage.
-  async function uploadMedia(file, folder) {
-    const type = isVideoFile(file) ? "video" : "image";
+  async function uploadMedia(originalFile, folder) {
+    const type = isVideoFile(originalFile) ? "video" : "image";
+    const file = type === "image" ? await compressImage(originalFile) : originalFile;
     if (db && state.user?.id) {
       const rawExt = (file.name.split(".").pop() || "").toLowerCase().replace(/[^a-z0-9]/g, "");
       const ext = rawExt || (type === "video" ? "mp4" : "jpg");
@@ -431,7 +455,8 @@ document.addEventListener("DOMContentLoaded", () => {
       const postsPath = `posts/${state.user.id}_${folder}_${stamp}.${ext}`;
       for (const path of (folder === "posts" ? [postsPath, userPath] : [userPath, postsPath])) {
         try {
-          const { error } = await db.storage.from("avatars").upload(path, file, { upsert: true, contentType: file.type || undefined });
+          // nome único por envio → pode ficar 1 ano em cache no navegador/CDN
+          const { error } = await db.storage.from("avatars").upload(path, file, { upsert: true, cacheControl: "31536000", contentType: file.type || undefined });
           if (!error) {
             const { data } = db.storage.from("avatars").getPublicUrl(path);
             if (data?.publicUrl) return { url: data.publicUrl, type };
@@ -580,7 +605,7 @@ document.addEventListener("DOMContentLoaded", () => {
       : initials(user.display_name || user.username);
 
     return `
-      <div class="avatar-live-wrapper ${liveClass}" ${liveAttr}>
+      <div class="avatar-live-wrapper ${liveClass}" data-uid="${escapeHTML(String(user.id ?? ""))}" ${liveAttr}>
         <div class="avatar ${sizeClass}">${imgOrInitials}</div>
       </div>
     `;
@@ -602,18 +627,42 @@ document.addEventListener("DOMContentLoaded", () => {
     return !!state.user && (l.host_id === state.user.id || state.followingIds.has(l.host_id) || isAdmin());
   }
 
-  async function fetchActiveLivesMap(force = false) {
-    if (!db) return;
-    if (!force && Date.now() - state.livesFetchedAt < 5000) return;
-    const { data } = await db.from("lives")
-      .select("*, profiles(id, display_name, username, avatar_url, is_verified, is_developer)")
-      .eq("status", "live");
-    state.livesFetchedAt = Date.now();
-    await ensureSocialState();
-    state.lives = (data || []).filter(canSeeLive);
-    state.userLivesMap = {};
-    state.lives.forEach(live => {
-      if (live.host_id) state.userLivesMap[live.host_id] = live;
+  // Várias telas pedem as lives ao mesmo tempo (início, stories, anéis): todas dividem UMA consulta.
+  let livesInflight = null;
+  function fetchActiveLivesMap(force = false) {
+    if (!db) return Promise.resolve();
+    if (!force && Date.now() - state.livesFetchedAt < 5000) return Promise.resolve();
+    if (livesInflight) return livesInflight;
+    livesInflight = (async () => {
+      try {
+        const { data, error } = await db.from("lives")
+          .select("*, profiles(id, display_name, username, avatar_url, is_verified, is_developer)")
+          .eq("status", "live");
+        if (error) return;                       // falhou: mantém o último estado conhecido em vez de apagar tudo
+        state.livesFetchedAt = Date.now();
+        await ensureSocialState();
+        state.lives = (data || []).filter(canSeeLive);
+        state.userLivesMap = {};
+        state.lives.forEach(live => {
+          if (live.host_id) state.userLivesMap[live.host_id] = live;
+        });
+      } catch (e) {
+        console.warn("Falha ao buscar lives:", e);
+      } finally {
+        livesInflight = null;
+      }
+    })();
+    return livesInflight;
+  }
+
+  // Atualiza o anel de "ao vivo" dos avatares que já estão na tela, sem refazer as listas.
+  function refreshLiveRings() {
+    $$(".avatar-live-wrapper[data-uid]").forEach(w => {
+      const uid = w.dataset.uid;
+      if (!uid) return;
+      const isLive = !!state.userLivesMap[uid];
+      w.classList.toggle("is-live", isLive);
+      if (isLive) w.dataset.liveUserId = uid; else delete w.dataset.liveUserId;
     });
   }
 
@@ -639,12 +688,13 @@ document.addEventListener("DOMContentLoaded", () => {
     window.scrollTo(0, 0);
     if (pageId === "pageChats") restoreChatTab();
 
-    await fetchActiveLivesMap();
-    if (state.currentPage !== pageId) return; // o usuário já foi para outra página
+    // Não trava a troca de página esperando a rede: o conteúdo já começa a carregar
+    // e os anéis de "ao vivo" são atualizados assim que a consulta volta.
+    fetchActiveLivesMap().then(refreshLiveRings);
 
     if (pageId === "pageHome") {
       loadStories();
-      loadPosts();
+      loadPosts({ soft: true });
     } else if (pageId === "pageTrending") {
       loadTrending();
     } else if (pageId === "pageChats") {
@@ -1407,15 +1457,15 @@ document.addEventListener("DOMContentLoaded", () => {
   function postMediaHTML(post, alt = "") {
     const url = escapeHTML(post.image_url);
     return isVideoPost(post)
-      ? `<video class="post-video" src="${url}" controls playsinline preload="metadata"></video>`
-      : `<img src="${url}" alt="${escapeHTML(alt)}" loading="lazy">`;
+      ? `<video class="post-video" src="${url}#t=0.1" controls playsinline preload="metadata"></video>`
+      : `<img src="${url}" alt="${escapeHTML(alt)}" loading="lazy" decoding="async">`;
   }
 
   function gridMediaHTML(post) {
     const url = escapeHTML(post.image_url);
     return isVideoPost(post)
       ? `<video src="${url}#t=0.1" muted playsinline preload="metadata"></video><span class="grid-play"><i class="fa-solid fa-play"></i></span>`
-      : `<img src="${url}" alt="" loading="lazy">`;
+      : `<img src="${url}" alt="" loading="lazy" decoding="async">`;
   }
 
   // Vídeos: só um toca por vez e todos pausam ao sair da tela.
@@ -1525,12 +1575,17 @@ document.addEventListener("DOMContentLoaded", () => {
   /* ================= COMENTÁRIOS ================= */
   async function submitComment(postId, input) {
     if (state.visitor || !state.user) return toast("Apenas usuários cadastrados podem comentar.");
-    const text = input.value.trim();
+    const text = input.value.trim().slice(0, 300);
     if (!text) return;
+    if (input.dataset.busy) return;                 // toque duplo não cria comentário repetido
 
-    input.disabled = true;
-    const { error } = await db.from("comments").insert({ post_id: postId, user_id: state.user.id, content: text });
-    input.disabled = false;
+    // readOnly (e não disabled): o teclado do celular não fecha enquanto envia
+    input.dataset.busy = "1"; input.readOnly = true;
+    let error = null;
+    try {
+      ({ error } = await db.from("comments").insert({ post_id: postId, user_id: state.user.id, content: text }));
+    } catch (e) { error = e; }
+    delete input.dataset.busy; input.readOnly = false;
     if (error) return toast(`Não foi possível comentar: ${formatError(error)}`);
 
     input.value = "";
@@ -1598,6 +1653,7 @@ document.addEventListener("DOMContentLoaded", () => {
     state.detailPostId = null;
     state.detailPost = null;
     state.posts = state.posts.filter(p => String(p.id) !== String(postId));
+    feedPaging.offset = Math.max(0, feedPaging.offset - 1);
     state.profilePosts = state.profilePosts.filter(p => String(p.id) !== String(postId));
     $$(`.post-card[data-post-id="${postId}"]`).forEach(card => card.remove());
     $$(`.grid-item[data-post-id="${postId}"]`).forEach(item => item.remove());
@@ -1647,7 +1703,17 @@ document.addEventListener("DOMContentLoaded", () => {
       </article>`;
   }
 
-  async function loadPosts() {
+  /* Feed com paginação: carrega poucas publicações primeiro (rápido) e busca mais ao rolar. */
+  const FEED_PAGE_SIZE = 12;
+  const feedPaging = { loading: false, done: false, loadedAt: 0, offset: 0, pendingReload: false };
+
+  function feedSkeletonHTML() {
+    const card = `<div class="skeleton-card"><div class="skeleton-line w40"></div><div class="skeleton-media"></div><div class="skeleton-line w70"></div></div>`;
+    return `<div class="feed-skeleton" aria-hidden="true">${card}${card}</div>`;
+  }
+
+  async function loadPosts(opts = {}) {
+    const { append = false, soft = false } = opts || {};
     const feed = $("#feedPosts");
     if (!feed) return;
 
@@ -1656,38 +1722,88 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    const { data: posts, error } = await db.from("posts").select(POST_SELECT)
-      .order("created_at", { ascending: false }).limit(60);
-
-    if (error) {
-      feed.innerHTML = `<div class="empty-state"><i class="fa-solid fa-triangle-exclamation"></i><p>Não foi possível carregar o feed.<br><small>${escapeHTML(formatError(error))}</small></p></div>`;
-      return;
-    }
-    if (!posts || posts.length === 0) {
-      state.posts = [];
-      feed.innerHTML = `<div class="empty-state"><i class="fa-regular fa-image"></i><p>Nenhuma publicação ainda. Seja o primeiro a compartilhar!</p></div>`;
+    const hasCards = !!feed.querySelector(".post-card");
+    // Voltar para o Início não refaz o feed à toa (mantém a rolagem e economiza dados).
+    if (!append && soft && hasCards && Date.now() - feedPaging.loadedAt < 20000) return;
+    if (append && (feedPaging.done || !hasCards)) return;
+    if (feedPaging.loading) {
+      if (!append && !soft) feedPaging.pendingReload = true;   // ex.: acabou de publicar: refaz quando terminar
       return;
     }
 
-    state.posts = posts;
-    const ids = posts.map(p => p.id);
+    feedPaging.loading = true;
+    if (!append && !hasCards) feed.innerHTML = feedSkeletonHTML();
 
-    const [commentsRes, likesRes] = await Promise.all([
-      db.from("comments").select(COMMENT_SELECT).in("post_id", ids).order("created_at", { ascending: true }),
-      state.user
-        ? db.from("post_likes").select("post_id").eq("user_id", state.user.id).in("post_id", ids)
-        : Promise.resolve({ data: [] })
-    ]);
+    try {
+      const from = append ? feedPaging.offset : 0;
+      const { data: fetched, error } = await db.from("posts").select(POST_SELECT)
+        .order("created_at", { ascending: false }).range(from, from + FEED_PAGE_SIZE - 1);
 
-    const commentsByPost = {};
-    (commentsRes.data || []).forEach(c => { (commentsByPost[c.post_id] = commentsByPost[c.post_id] || []).push(c); });
+      if (error) {
+        if (append) return toast(`Não foi possível carregar mais: ${formatError(error)}`);
+        feed.innerHTML = `<div class="empty-state"><i class="fa-solid fa-triangle-exclamation"></i><p>Não foi possível carregar o feed.<br><small>${escapeHTML(formatError(error))}</small></p></div>`;
+        return;
+      }
 
-    ids.forEach(id => state.myLikes.delete(String(id)));
-    (likesRes.data || []).forEach(l => state.myLikes.add(String(l.post_id)));
+      const rows = fetched || [];
+      feedPaging.offset = from + rows.length;
+      feedPaging.done = rows.length < FEED_PAGE_SIZE;
 
-    feed.innerHTML = posts.map(post => postCardHTML(post, commentsByPost[post.id] || [])).join("");
-    observeVideos(feed);
+      let posts = rows;
+      if (append) {
+        const known = new Set(state.posts.map(p => String(p.id)));
+        posts = rows.filter(p => !known.has(String(p.id)));   // posts novos deslocam a paginação: evita repetir
+      }
+
+      if (!append && !posts.length) {
+        state.posts = [];
+        feedPaging.loadedAt = Date.now();
+        feed.innerHTML = `<div class="empty-state"><i class="fa-regular fa-image"></i><p>Nenhuma publicação ainda. Seja o primeiro a compartilhar!</p></div>`;
+        return;
+      }
+      if (!posts.length) return;
+
+      const ids = posts.map(p => p.id);
+      const [commentsRes, likesRes] = await Promise.all([
+        db.from("comments").select(COMMENT_SELECT).in("post_id", ids).order("created_at", { ascending: true }),
+        state.user
+          ? db.from("post_likes").select("post_id").eq("user_id", state.user.id).in("post_id", ids)
+          : Promise.resolve({ data: [] })
+      ]);
+
+      const commentsByPost = {};
+      (commentsRes.data || []).forEach(c => { (commentsByPost[c.post_id] = commentsByPost[c.post_id] || []).push(c); });
+
+      ids.forEach(id => state.myLikes.delete(String(id)));
+      (likesRes.data || []).forEach(l => state.myLikes.add(String(l.post_id)));
+
+      state.posts = append ? state.posts.concat(posts) : posts;
+      const html = posts.map(post => postCardHTML(post, commentsByPost[post.id] || [])).join("");
+      if (append) feed.insertAdjacentHTML("beforeend", html);
+      else feed.innerHTML = html;
+      observeVideos(feed);
+      feedPaging.loadedAt = Date.now();
+    } finally {
+      feedPaging.loading = false;
+      if (feedPaging.pendingReload) { feedPaging.pendingReload = false; loadPosts(); }
+      else if (append) feedPaging.recheck?.();
+    }
   }
+
+  // Rolagem infinita: quando o fim do feed chega perto da tela, busca a próxima página.
+  (function setupFeedInfiniteScroll() {
+    const feed = $("#feedPosts");
+    if (!feed || !("IntersectionObserver" in window)) return;
+    const sentinel = document.createElement("div");
+    sentinel.id = "feedSentinel";
+    sentinel.style.cssText = "height:1px;";
+    feed.insertAdjacentElement("afterend", sentinel);
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some(en => en.isIntersecting) && state.currentPage === "pageHome") loadPosts({ append: true });
+    }, { rootMargin: "700px 0px" });
+    io.observe(sentinel);
+    feedPaging.recheck = () => { io.unobserve(sentinel); io.observe(sentinel); };   // re-testa se ainda está perto
+  })();
 
   on("#feedPosts", "click", (e) => {
     const card = e.target.closest(".post-card");
@@ -2074,9 +2190,8 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    const { data: rawLives } = await db.from("lives").select("*, profiles(*)").eq("status", "live");
-    await ensureSocialState();
-    const lives = (rawLives || []).filter(canSeeLive);
+    await fetchActiveLivesMap();
+    const lives = state.lives;
     
     let html = "";
     
@@ -2446,17 +2561,26 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-   on("#liveSetupForm", "submit", async (e) => {
+  let liveStarting = false;
+  on("#liveSetupForm", "submit", async (e) => {
     e.preventDefault();
+    if (liveStarting) return;                       // clique duplo não cria duas lives
     if (!state.user?.id || !db) return toast("Não conectado ao banco de dados.");
 
     const title = $("#liveTitle")?.value.trim();
     const category = "Geral";
-
     if (!title) return toast("Preencha o título da live.");
 
+    liveStarting = true;
+    const submitBtn = $("#liveSetupForm button[type='submit']");
+    if (submitBtn) submitBtn.disabled = true;
+    let stream = null, phase = "camera";
     try {
-    
+      // 1º a câmera e o microfone. Só depois a live é criada no banco: se o usuário negar a permissão,
+      // não sobra uma live "fantasma" aparecendo para os outros em Em Alta.
+      stream = await getHostStream();
+      phase = "banco";
+
       await db.from("lives").update({ status: "ended" }).eq("host_id", state.user.id).eq("status", "live");
       const livePayload = {
         host_id: state.user.id,
@@ -2473,16 +2597,21 @@ document.addEventListener("DOMContentLoaded", () => {
         ({ data, error } = await db.from("lives").insert(livePayload).select().single());
       }
       if (error) throw error;
-      
+
       // Vincula o perfil local do criador da live manualmente para a tela
       data.profiles = state.profile;
 
-
       closeModal("liveSetupModal");
+      const input = $("#liveTitle"); if (input) input.value = "";
+      const mine = stream; stream = null;           // a sala assume o controle da câmera
       toast("Transmissão iniciada!");
-      await openLiveRoom(data, true);
+      await openLiveRoom(data, mine);
     } catch (err) {
-      toast(`Erro ao iniciar live: ${formatError(err)}`);
+      stream?.getTracks().forEach(t => t.stop());
+      toast(phase === "camera" ? mediaErrorMessage(err) : `Erro ao iniciar live: ${formatError(err)}`);
+    } finally {
+      liveStarting = false;
+      if (submitBtn) submitBtn.disabled = false;
     }
   });
 
@@ -4183,7 +4312,7 @@ document.addEventListener("DOMContentLoaded", () => {
     ch: null, stream: null, pcs: {}, session: 0, connected: false,
     joinTimer: null, negTimer: null, hostGoneTimer: null, discTimer: null,
     heartbeatTimer: null, viewersTimer: null, wakeLock: null, viewers: 0,
-    lastChatAt: 0, hbOk: true, vcOk: true
+    lastChatAt: 0, hbOk: true, vcOk: true, token: null
   };
 
   function addLiveMsg(name, text, isHostMsg = false) {
@@ -4202,11 +4331,24 @@ document.addEventListener("DOMContentLoaded", () => {
     try { return live.ch?.send({ type: "broadcast", event, payload }); } catch (e) { return null; }
   }
 
+  // Os candidatos ICE saem em LOTE (1 mensagem a cada ~120 ms, em vez de 1 por candidato).
+  // Enviar dezenas de mensagens de uma vez estoura o limite do Realtime e a conexão nunca fecha.
+  function flushIceOut(pc, peerId) {
+    clearTimeout(pc._iceT); pc._iceT = null;
+    const cs = pc._iceOut || [];
+    pc._iceOut = [];
+    if (cs.length && live.pcs[peerId] === pc) sendSig("ice", { from: state.user.id, to: peerId, cs });
+  }
+  const iceList = (payload) => Array.isArray(payload?.cs) ? payload.cs : (payload?.c ? [payload.c] : []);
+
   function newPC(peerId) {
     const pc = new RTCPeerConnection(RTC_CFG);
     live.pcs[peerId] = pc;
+    pc._iceOut = [];
     pc.onicecandidate = (e) => {
-      if (e.candidate) sendSig("ice", { from: state.user.id, to: peerId, c: e.candidate.toJSON ? e.candidate.toJSON() : e.candidate });
+      if (!e.candidate) return flushIceOut(pc, peerId);
+      pc._iceOut.push(e.candidate.toJSON ? e.candidate.toJSON() : e.candidate);
+      if (!pc._iceT) pc._iceT = setTimeout(() => flushIceOut(pc, peerId), 120);
     };
     return pc;
   }
@@ -4271,8 +4413,9 @@ document.addEventListener("DOMContentLoaded", () => {
     clearTimeout(live.discTimer); clearInterval(live.heartbeatTimer); clearTimeout(live.viewersTimer);
     live.joinTimer = live.negTimer = live.hostGoneTimer = live.discTimer = live.heartbeatTimer = live.viewersTimer = null;
     live.connected = false; live.hbOk = true; live.vcOk = true;
-    Object.values(live.pcs).forEach(pc => { try { pc.onconnectionstatechange = null; pc.close(); } catch (e) {} });
+    Object.values(live.pcs).forEach(pc => { try { clearTimeout(pc._iceT); pc.onicecandidate = null; pc.onconnectionstatechange = null; pc.close(); } catch (e) {} });
     live.pcs = {};
+    live.token = null;
     live.stream?.getTracks().forEach(t => t.stop());
     live.stream = null;
     releaseWake();
@@ -4284,15 +4427,24 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   async function getHostStream() {
-    if (!navigator.mediaDevices?.getUserMedia) throw new Error("NO_MEDIA");
+    const md = navigator.mediaDevices;
+    if (!md?.getUserMedia) throw new Error("NO_MEDIA");
     try {
-      return await navigator.mediaDevices.getUserMedia({
+      return await md.getUserMedia({
         video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
       });
     } catch (e) {
-      if (e && (e.name === "OverconstrainedError" || e.name === "NotFoundError")) {
-        return await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      if (!e || (e.name !== "OverconstrainedError" && e.name !== "NotFoundError")) throw e;
+    }
+    try {
+      return await md.getUserMedia({ video: true, audio: true });
+    } catch (e) {
+      if (e && e.name === "NotFoundError") {
+        // Sem microfone: transmite só o vídeo e AVISA (antes a live falhava ou ia sem som sem ninguém saber).
+        const onlyVideo = await md.getUserMedia({ video: true });
+        setTimeout(() => toast("Microfone não encontrado: você está transmitindo sem áudio."), 600);
+        return onlyVideo;
       }
       throw e;
     }
@@ -4306,8 +4458,9 @@ document.addEventListener("DOMContentLoaded", () => {
     return "Não foi possível iniciar a câmera.";
   }
 
-  async function openLiveRoom(l) {
-    if (!l || !db || !state.user) return;
+  async function openLiveRoom(l, preStream) {
+    const pre = (typeof MediaStream !== "undefined" && preStream instanceof MediaStream) ? preStream : null;
+    if (!l || !db || !state.user) { pre?.getTracks().forEach(t => t.stop()); return; }
     await teardownLive();
     const session = live.session;
     const alive = () => session === live.session;
@@ -4334,6 +4487,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     ch.on("broadcast", { event: "chat" }, ({ payload }) => {
       if (!payload || !alive()) return;
+      if (payload.uid && state.blockedIds.has(payload.uid)) return;   // usuário que eu bloqueei não aparece
       addLiveMsg(String(payload.name || "Alguém").slice(0, 40), String(payload.text || "").slice(0, 200), payload.uid === l.host_id);
     });
     ch.on("broadcast", { event: "gift" }, ({ payload }) => {
@@ -4363,10 +4517,19 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (isHost) {
       try {
-        const stream = await getHostStream();
+        const stream = pre || await getHostStream();
         if (!alive()) { stream.getTracks().forEach(t => t.stop()); return; }
         live.stream = stream;
         stream.getVideoTracks().forEach(t => { try { t.contentHint = "motion"; } catch (e) {} });
+        // Câmera desligada/desconectada = os espectadores ficariam com a imagem congelada: encerra com aviso.
+        stream.getTracks().forEach(t => {
+          t.onended = () => {
+            if (!alive() || live.stream !== stream) return;
+            if (t.kind === "audio") return toast("O microfone foi desconectado. Sua live continua sem áudio.");
+            toast("A câmera foi desconectada. Transmissão encerrada.");
+            endActiveLive();
+          };
+        });
         vid.srcObject = stream; vid.muted = true;           // mudo no criador: evita eco
         vid.classList.remove("hidden"); vid.classList.add("mirror"); ph.classList.add("hidden");
         vid.onloadedmetadata = () => fitVideo(vid);
@@ -4385,8 +4548,12 @@ document.addEventListener("DOMContentLoaded", () => {
         const { error } = await db.from("lives").update({ last_heartbeat: new Date().toISOString() }).eq("id", l.id);
         if (error) live.hbOk = false;
       };
+      const refreshToken = async () => {
+        try { const { data } = await db.auth.getSession(); live.token = data?.session?.access_token || live.token; } catch (e) {}
+      };
+      refreshToken();
       beat();
-      live.heartbeatTimer = setInterval(beat, 20000);
+      live.heartbeatTimer = setInterval(() => { refreshToken(); beat(); }, 20000);
 
       ch.on("broadcast", { event: "join" }, async ({ payload }) => {
         if (!live.stream || !alive()) return;
@@ -4411,12 +4578,12 @@ document.addEventListener("DOMContentLoaded", () => {
       ch.on("broadcast", { event: "answer" }, async ({ payload }) => {
         const pc = live.pcs[payload?.from];
         if (payload?.to === me && pc) {
-          try { await pc.setRemoteDescription(payload.sdp); await flushIce(pc); } catch (e) { console.warn("Falha na resposta:", e); }
+          try { await pc.setRemoteDescription(payload.sdp); await flushIce(pc); rebalanceBitrate(); } catch (e) { console.warn("Falha na resposta:", e); }
         }
       });
       ch.on("broadcast", { event: "ice" }, ({ payload }) => {
         const pc = live.pcs[payload?.from];
-        if (payload?.to === me && pc) addIce(pc, payload.c);
+        if (payload?.to === me && pc) iceList(payload).forEach(c => addIce(pc, c));
       });
     } else {
       const requestJoin = () => { if (alive() && !live.connected) sendSig("join", { viewer: me }); };
@@ -4456,12 +4623,17 @@ document.addEventListener("DOMContentLoaded", () => {
         live.negTimer = setTimeout(() => { if (alive() && !live.connected) reconnect(); }, 15000);
         try { live.pcs[l.host_id]?.close(); } catch (e) {}
         const pc = newPC(l.host_id);
+        let playStarted = false;
         pc.ontrack = (e) => {
           const stream = e.streams[0] || (pc._ms = pc._ms || new MediaStream());
           if (!e.streams[0]) pc._ms.addTrack(e.track);
           if (vid.srcObject !== stream) vid.srcObject = stream;
           vid.classList.remove("hidden"); vid.classList.remove("mirror"); ph.classList.add("hidden");
           vid.onloadedmetadata = () => fitVideo(vid);
+          // Áudio e vídeo chegam em eventos separados. Antes cada um refazia mute/play e um cancelava o outro
+          // (som que "some" ou botão de ativar som que aparecia sem motivo): agora só o 1º decide o mudo.
+          if (playStarted) { vid.play().catch(() => {}); return; }
+          playStarted = true;
           vid.muted = false;
           vid.play().then(updateSoundBtn).catch(() => { vid.muted = true; vid.play().catch(() => {}); updateSoundBtn(); });
         };
@@ -4480,7 +4652,7 @@ document.addEventListener("DOMContentLoaded", () => {
       });
       ch.on("broadcast", { event: "ice" }, ({ payload }) => {
         const pc = live.pcs[payload?.from];
-        if (payload?.to === me && pc) addIce(pc, payload.c);
+        if (payload?.to === me && pc) iceList(payload).forEach(c => addIce(pc, c));
       });
       ch.on("broadcast", { event: "ended" }, () => { if (alive()) { toast("A transmissão foi encerrada."); leaveLiveRoom(); } });
 
@@ -4491,7 +4663,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!alive()) return;
       if (status === "SUBSCRIBED") {
         await ch.track({ u: me });
-        if (!isHost) { live.connected = false; live.startJoinRetry?.(); }
+        if (!isHost && !live.connected) live.startJoinRetry?.();   // se o vídeo já está conectado, não reinicia
       } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
         toast("Conexão instável. Tentando reconectar...");
       }
@@ -4590,6 +4762,19 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   })();
 
+  // Criador fechou a aba/app sem encerrar: avisa o banco na hora (a live some da lista em vez de esperar o timeout).
+  window.addEventListener("pagehide", () => {
+    const l = state.activeLive;
+    if (!l || !state.user || l.host_id !== state.user.id || !live.token) return;
+    try {
+      fetch(`${SUPABASE_URL}/rest/v1/lives?id=eq.${encodeURIComponent(l.id)}`, {
+        method: "PATCH", keepalive: true,
+        headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${live.token}`, "Content-Type": "application/json", Prefer: "return=minimal" },
+        body: JSON.stringify({ status: "ended" })
+      }).catch(() => {});
+    } catch (e) {}
+  });
+
   async function leaveLiveRoom() {
     await teardownLive();
     state.activeLive = null;
@@ -4637,7 +4822,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const name = state.profile?.display_name || state.profile?.username || "Você";
     const isHostMsg = state.user?.id === state.activeLive.host_id;
     addLiveMsg(name, text, isHostMsg);
-    sendSig("chat", { name, text, uid: state.user.id });
+    Promise.resolve(sendSig("chat", { name, text, uid: state.user.id }))
+      .then(r => { if (r && r !== "ok") toast("Seu comentário pode não ter chegado. Verifique a conexão."); })
+      .catch(() => toast("Seu comentário pode não ter chegado. Verifique a conexão."));
     input.value = "";
   });
 
