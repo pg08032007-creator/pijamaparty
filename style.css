@@ -1728,3 +1728,47 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .8; }
 }
 .live-sound-btn.hidden { display: none; }
 .live-chat .message.host { border-color: var(--primary); background: rgba(255,42,95,.22); }
+
+/* =========================================================
+   DESEMPENHO (ajustes adicionados no checkup)
+========================================================= */
+
+/* Live: o blur (backdrop-filter) sobre vídeo em movimento força a GPU a refazer o efeito a cada quadro
+   e causa travadas no vídeo/áudio em celulares. Aqui trocamos por fundo semitransparente, visualmente igual. */
+.page.live-room .floating-back,
+.page.live-room .live-top-info,
+.page.live-room .live-chat .message,
+.page.live-room .live-sound-btn,
+.page.live-room .live-swipe-hint {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+.page.live-room .floating-back { background: rgba(0, 0, 0, .72); }
+.page.live-room .live-top-info { background: rgba(0, 0, 0, .7); }
+.page.live-room .live-chat .message { background: rgba(24, 24, 31, .84); }
+.page.live-room .live-sound-btn { background: rgba(0, 0, 0, .78); }
+
+/* Feed: o navegador só desenha os posts perto da tela (rolagem e abertura bem mais leves). */
+.post-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 560px;
+}
+
+/* Skeleton do feed: mostra a estrutura na hora enquanto os posts chegam. */
+.feed-skeleton { display: grid; gap: 16px; padding: 4px 0; }
+.skeleton-card {
+  display: grid; gap: 12px; padding: 14px;
+  border: 1px solid var(--border); border-radius: 18px; background: var(--surface, transparent);
+}
+.skeleton-line, .skeleton-media {
+  border-radius: 10px;
+  background: linear-gradient(90deg, rgba(128,128,140,.14) 25%, rgba(128,128,140,.26) 50%, rgba(128,128,140,.14) 75%);
+  background-size: 200% 100%;
+  animation: skeletonShimmer 1.3s ease-in-out infinite;
+}
+.skeleton-line { height: 12px; }
+.skeleton-line.w40 { width: 40%; }
+.skeleton-line.w70 { width: 70%; }
+.skeleton-media { height: 260px; border-radius: 14px; }
+@keyframes skeletonShimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .skeleton-line, .skeleton-media { animation: none; } }
