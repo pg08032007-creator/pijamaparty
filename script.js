@@ -601,7 +601,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const liveClass = isLive ? "is-live" : "";
 
     const imgOrInitials = user.avatar_url
-      ? `<img src="${escapeHTML(user.avatar_url)}" alt="Avatar" loading="lazy" decoding="async">`
+      ? `<img src="${escapeHTML(user.avatar_url)}" alt="Avatar">`
       : initials(user.display_name || user.username);
 
     return `
@@ -706,7 +706,8 @@ document.addEventListener("DOMContentLoaded", () => {
       fetchAndRenderMessages();
     } else if (pageId === "pageProfile") {
       updateProfileUI();
-      refreshProfile().then(loadProfileExtras);
+      refreshProfile();          // em paralelo: o grid não espera o perfil voltar
+      loadProfileExtras();
     } else if (pageId === "pageStore") {
       updateProfileUI();
       loadStore();
@@ -833,6 +834,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function leaveApp() {
     stopRealtime();
+    clearFeedCache();
     appScreen?.classList.add("hidden");
     authScreen?.classList.remove("hidden");
   }
@@ -1454,11 +1456,14 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const isVideoPost = (post) => post?.media_type === "video";
 
-  function postMediaHTML(post, alt = "") {
+  // eager = primeiras publicações do feed: baixam já, com prioridade alta (sem esperar rolar).
+  function postMediaHTML(post, alt = "", eager = false) {
     const url = escapeHTML(post.image_url);
     return isVideoPost(post)
       ? `<video class="post-video" src="${url}#t=0.1" controls playsinline preload="metadata"></video>`
-      : `<img src="${url}" alt="${escapeHTML(alt)}" loading="lazy" decoding="async">`;
+      : (eager
+        ? `<img src="${url}" alt="${escapeHTML(alt)}" fetchpriority="high" decoding="async">`
+        : `<img src="${url}" alt="${escapeHTML(alt)}" loading="lazy" decoding="async">`);
   }
 
   function gridMediaHTML(post) {
@@ -1707,7 +1712,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ================= FEED DE FOTOS ================= */
-  function postCardHTML(post, comments) {
+  function postCardHTML(post, comments, eager = false) {
     const author = post.profiles || { username: "usuario", display_name: "Usuário" };
     state.commentCounts[post.id] = comments.length;
     const commentsHTML = comments.slice(-SAMPLE_COMMENTS).map(commentHTML).join("");
@@ -1725,7 +1730,7 @@ document.addEventListener("DOMContentLoaded", () => {
         </header>
 
         <div class="post-image-container">
-          ${postMediaHTML(post, `Post de ${author.username}`)}
+          ${postMediaHTML(post, `Post de ${author.username}`, eager)}
         </div>
 
         ${actionsHTML(post)}
@@ -1748,6 +1753,45 @@ document.addEventListener("DOMContentLoaded", () => {
     return `<div class="feed-skeleton" aria-hidden="true">${card}${card}</div>`;
   }
 
+  /* Cache do feed: ao abrir o app os posts aparecem NA HORA (do último acesso) e são atualizados em seguida. */
+  const FEED_CACHE_KEY = "pp_feed_cache_v1";
+  function readFeedCache() {
+    try {
+      const c = JSON.parse(localStorage.getItem(FEED_CACHE_KEY) || "null");
+      if (c && state.user && c.uid === state.user.id && Array.isArray(c.posts) && c.posts.length) return c;
+    } catch (e) {}
+    return null;
+  }
+  function writeFeedCache(posts, commentsByPost) {
+    try {
+      if (!state.user) return;
+      const slice = posts.slice(0, FEED_PAGE_SIZE);
+      const comments = {};
+      slice.forEach(p => { comments[p.id] = (commentsByPost[p.id] || []).slice(-30); });
+      const liked = slice.filter(p => state.myLikes.has(String(p.id))).map(p => String(p.id));
+      localStorage.setItem(FEED_CACHE_KEY, JSON.stringify({ uid: state.user.id, posts: slice, comments, liked }));
+    } catch (e) {}
+  }
+  function clearFeedCache() { try { localStorage.removeItem(FEED_CACHE_KEY); } catch (e) {} }
+
+  // Comentários e curtidas chegam depois dos cards e são encaixados nos posts já na tela.
+  function applyFeedExtras(posts, commentsByPost, likedIds) {
+    const feed = $("#feedPosts");
+    posts.forEach(post => {
+      const key = String(post.id);
+      if (likedIds.has(key)) state.myLikes.add(key); else state.myLikes.delete(key);
+      const list = commentsByPost[post.id] || [];
+      state.commentCounts[post.id] = list.length;
+      const card = feed?.querySelector(`.post-card[data-post-id="${post.id}"]`);
+      if (!card) return;
+      const cl = card.querySelector("[data-comments-for]");
+      if (cl) cl.innerHTML = list.slice(-SAMPLE_COMMENTS).map(commentHTML).join("");
+      const va = card.querySelector("[data-viewall-for]");
+      if (va) va.innerHTML = viewAllHTML(post.id, list.length);
+      syncLikeUI(post.id);
+    });
+  }
+
   async function loadPosts(opts = {}) {
     const { append = false, soft = false } = opts || {};
     const feed = $("#feedPosts");
@@ -1768,7 +1812,19 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     feedPaging.loading = true;
-    if (!append && !hasCards) feed.innerHTML = feedSkeletonHTML();
+    let shownIds = null;                       // ids já na tela vindos do cache
+    if (!append && !hasCards) {
+      const cached = readFeedCache();
+      if (cached) {
+        state.posts = cached.posts;
+        feed.innerHTML = cached.posts.map((post, i) => postCardHTML(post, [], i < 3)).join("");
+        shownIds = cached.posts.map(p => String(p.id)).join();
+        applyFeedExtras(cached.posts, cached.comments || {}, new Set(cached.liked || []));
+        observeVideos(feed);
+      } else {
+        feed.innerHTML = feedSkeletonHTML();
+      }
+    }
 
     try {
       const from = append ? feedPaging.offset : 0;
@@ -1800,25 +1856,29 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!posts.length) return;
 
       const ids = posts.map(p => p.id);
-      const [commentsRes, likesRes] = await Promise.all([
+      // Comentários e curtidas começam a buscar já, mas os posts NÃO esperam por eles.
+      const extrasPromise = Promise.all([
         db.from("comments").select(COMMENT_SELECT).in("post_id", ids).order("created_at", { ascending: true }),
         state.user
           ? db.from("post_likes").select("post_id").eq("user_id", state.user.id).in("post_id", ids)
           : Promise.resolve({ data: [] })
       ]);
 
+      state.posts = append ? state.posts.concat(posts) : posts;
+      const sameAsCache = !append && shownIds !== null && shownIds === ids.map(String).join();
+      if (!sameAsCache) {
+        const html = posts.map((post, i) => postCardHTML(post, [], !append && i < 3)).join("");
+        if (append) feed.insertAdjacentHTML("beforeend", html);
+        else feed.innerHTML = html;
+        observeVideos(feed);
+      }
+      feedPaging.loadedAt = Date.now();
+
+      const [commentsRes, likesRes] = await extrasPromise;
       const commentsByPost = {};
       (commentsRes.data || []).forEach(c => { (commentsByPost[c.post_id] = commentsByPost[c.post_id] || []).push(c); });
-
-      ids.forEach(id => state.myLikes.delete(String(id)));
-      (likesRes.data || []).forEach(l => state.myLikes.add(String(l.post_id)));
-
-      state.posts = append ? state.posts.concat(posts) : posts;
-      const html = posts.map(post => postCardHTML(post, commentsByPost[post.id] || [])).join("");
-      if (append) feed.insertAdjacentHTML("beforeend", html);
-      else feed.innerHTML = html;
-      observeVideos(feed);
-      feedPaging.loadedAt = Date.now();
+      applyFeedExtras(posts, commentsByPost, new Set((likesRes.data || []).map(l => String(l.post_id))));
+      if (!append) writeFeedCache(posts, commentsByPost);
     } finally {
       feedPaging.loading = false;
       if (feedPaging.pendingReload) { feedPaging.pendingReload = false; loadPosts(); }
@@ -2001,8 +2061,23 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // Seguidores, seguindo, curtidas recebidas e publicações vêm direto das tabelas.
+  // Cache em memória: reabrir um perfil mostra o último conteúdo na hora e atualiza em seguida.
+  const profileDataCache = new Map();
+  const PROFILE_CACHE_MAX = 30;
+
   async function loadUserProfileData(userId, ui) {
     if (!db || !userId) return null;
+
+    const cached = profileDataCache.get(userId);
+    let shownSig = null;
+    if (cached && (!ui.guard || ui.guard())) {
+      state.profilePosts = cached.posts;
+      if (cached.stats.followers !== null) setText(ui.followers, cached.stats.followers);
+      if (cached.stats.following !== null) setText(ui.following, cached.stats.following);
+      setText(ui.likes, cached.stats.likes);
+      renderProfileGrid(ui.grid, cached.posts, !!ui.own);
+      shownSig = cached.sig;
+    }
 
     const [followersRes, followingRes, postsRes] = await Promise.all([
       db.from("follows").select("follower_id", { count: "exact", head: true }).eq("following_id", userId),
@@ -2025,15 +2100,24 @@ document.addEventListener("DOMContentLoaded", () => {
     if (stats.following !== null) setText(ui.following, stats.following);
     setText(ui.likes, stats.likes);
 
-    if (state.user && posts.length) {
-      const { data: liked } = await db.from("post_likes").select("post_id")
-        .eq("user_id", state.user.id).in("post_id", posts.map(p => p.id));
-      posts.forEach(p => state.myLikes.delete(String(p.id)));
-      (liked || []).forEach(l => state.myLikes.add(String(l.post_id)));
+    // O grid aparece assim que os posts chegam; as curtidas (coração) são buscadas depois.
+    const sig = posts.map(p => `${p.id}:${p.likes_count || 0}`).join();
+    if (sig !== shownSig || !postsRes.error && !posts.length) renderProfileGrid(ui.grid, posts, !!ui.own);
+
+    if (!postsRes.error) {
+      profileDataCache.set(userId, { posts, stats, sig });
+      if (profileDataCache.size > PROFILE_CACHE_MAX) profileDataCache.delete(profileDataCache.keys().next().value);
     }
 
-    if (ui.guard && !ui.guard()) return null;
-    renderProfileGrid(ui.grid, posts, !!ui.own);
+    if (state.user && posts.length) {
+      db.from("post_likes").select("post_id")
+        .eq("user_id", state.user.id).in("post_id", posts.map(p => p.id))
+        .then(({ data: liked }) => {
+          posts.forEach(p => state.myLikes.delete(String(p.id)));
+          (liked || []).forEach(l => state.myLikes.add(String(l.post_id)));
+          if (state.detailPostId !== null && state.detailPostId !== undefined) syncLikeUI(state.detailPostId);
+        });
+    }
     return stats;
   }
 
@@ -2046,15 +2130,8 @@ document.addEventListener("DOMContentLoaded", () => {
     btn.textContent = isFollowing ? "Seguindo" : "Seguir";
   }
 
-  async function openUserProfile(targetUser) {
-    if (!targetUser) return;
-
-    if (db && targetUser.id) {
-      const { data: fullProfile } = await db.from("profiles").select("*").eq("id", targetUser.id).maybeSingle();
-      if (fullProfile) targetUser = { ...targetUser, ...fullProfile };
-    }
-
-    state.activeOtherUser = targetUser;
+  // Desenha o cabeçalho do perfil de outra pessoa. repaint = só atualiza os dados (não zera grid/contadores).
+  function paintOtherProfile(targetUser, repaint = false) {
     const isSelf = !!state.user && state.user.id === targetUser.id;
 
     const avatar = $("#otherAvatar");
@@ -2072,9 +2149,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     const banner = $("#otherBanner");
-    if (banner) {
-      applyBanner(banner, targetUser.banner_url);
-    }
+    if (banner) applyBanner(banner, targetUser.banner_url);
 
     const name = $("#otherName");
     if (name) {
@@ -2082,20 +2157,17 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     setText("#otherUsername", `@${targetUser.username || "usuario"}`);
     setText("#otherBio", targetUser.bio || "Sem apresentação.");
-    setText("#otherFollowers", targetUser.followers || 0);
-    setText("#otherFollowing", targetUser.following || 0);
-    setText("#otherLikes", "0");
-    const grid = $("#otherProfileContent");
-    if (grid) grid.innerHTML = "";
 
-    $("#btnFollowUser")?.classList.toggle("hidden", isSelf);
-    $("#btnMessageUser")?.classList.toggle("hidden", isSelf);
-    setFollowButton(false);
-
-    if (state.user && db && targetUser.id && !isSelf) {
-      const { data } = await db.from("follows").select("follower_id")
-        .eq("follower_id", state.user.id).eq("following_id", targetUser.id).maybeSingle();
-      if (state.activeOtherUser?.id === targetUser.id) setFollowButton(!!data);
+    if (!repaint) {
+      const cached = profileDataCache.get(targetUser.id);
+      setText("#otherFollowers", cached?.stats.followers ?? targetUser.followers ?? 0);
+      setText("#otherFollowing", cached?.stats.following ?? targetUser.following ?? 0);
+      setText("#otherLikes", cached?.stats.likes ?? "0");
+      const grid = $("#otherProfileContent");
+      if (grid) grid.innerHTML = "";
+      $("#btnFollowUser")?.classList.toggle("hidden", isSelf);
+      $("#btnMessageUser")?.classList.toggle("hidden", isSelf);
+      setFollowButton(false);
     }
 
     const btnVerified = $("#btnToggleVerified");
@@ -2110,9 +2182,32 @@ document.addEventListener("DOMContentLoaded", () => {
         ? `<i class="fa-solid fa-code"></i> Remover Developer`
         : `<i class="fa-solid fa-code"></i> Dar Developer`;
     }
+  }
 
+  async function openUserProfile(targetUser) {
+    if (!targetUser) return;
+
+    // 1) mostra a tela IMEDIATAMENTE com o que já temos
+    state.activeOtherUser = targetUser;
+    const id = targetUser.id;
+    const isSelf = !!state.user && state.user.id === id;
+    paintOtherProfile(targetUser);
     navigateTo("pageUserProfile");
-    refreshOtherProfileData();
+    refreshOtherProfileData();                       // posts/contadores (usa cache se houver)
+
+    // 2) completa o perfil e o estado de "seguindo" em paralelo, sem travar a abertura
+    if (db && id) {
+      db.from("profiles").select("*").eq("id", id).maybeSingle().then(({ data }) => {
+        if (!data || state.activeOtherUser?.id !== id) return;
+        state.activeOtherUser = { ...state.activeOtherUser, ...data };
+        paintOtherProfile(state.activeOtherUser, true);
+      });
+      if (state.user && !isSelf) {
+        db.from("follows").select("follower_id")
+          .eq("follower_id", state.user.id).eq("following_id", id).maybeSingle()
+          .then(({ data }) => { if (state.activeOtherUser?.id === id) setFollowButton(!!data); });
+      }
+    }
   }
 
   async function refreshOtherProfileData() {
@@ -4439,15 +4534,13 @@ document.addEventListener("DOMContentLoaded", () => {
   // Rede de segurança: se o tempo real não estiver ativo no Supabase, a tela ainda atualiza.
   function startPolling() {
     stopPolling();
-    let tick = 0;
     pollTimer = setInterval(() => {
       if (document.hidden || !state.user) return;
-      tick++;
       refreshUnreadCounts();
       markDelivered();
       if (state.currentPage === "pageChatRoom") fetchAndRenderMessages({ silent: true });
-      if (state.currentPage === "pageTrending" && tick % 3 === 0) loadTrending();   // tempo real já cobre o resto
-    }, 15000);
+      if (state.currentPage === "pageTrending") loadTrending();
+    }, 10000);
   }
 
   function stopPolling() {
@@ -4475,9 +4568,11 @@ document.addEventListener("DOMContentLoaded", () => {
       state.session = data.session;
       state.user = data.session.user;
       state.visitor = false;
+      loadPosts();                       // feed começa a carregar em paralelo com o perfil
       await fetchProfile();
       if (await rejectIfBanned()) return;
       enterApp();
+      if (isAdmin()) loadPosts();       // admin precisa dos botões de moderação nos cards (perfil chegou depois do feed)
     } else {
       state.visitor = true;
     }
