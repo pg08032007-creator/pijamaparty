@@ -601,7 +601,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const liveClass = isLive ? "is-live" : "";
 
     const imgOrInitials = user.avatar_url
-      ? `<img src="${escapeHTML(user.avatar_url)}" alt="Avatar">`
+      ? `<img src="${escapeHTML(user.avatar_url)}" alt="Avatar" loading="lazy" decoding="async">`
       : initials(user.display_name || user.username);
 
     return `
@@ -1492,11 +1492,46 @@ document.addEventListener("DOMContentLoaded", () => {
       : "";
   }
 
+  // Destaca @menções dentro do texto do comentário.
+  function mentionsHTML(text) {
+    return escapeHTML(text).replace(/(^|\s)@([a-z0-9_.]{3,20})/gi, '$1<span class="mention">@$2</span>');
+  }
+
+  // Tocar no comentário responde ao autor (menciona @usuario na caixa de comentário).
   function commentHTML(comment) {
+    const uname = comment.profiles?.username || "usuario";
     return `
-      <div class="post-comment-item">
-        <strong>@${escapeHTML(comment.profiles?.username || "usuario")} ${getBadgesHTML(comment.profiles)}:</strong> ${escapeHTML(comment.content)}
+      <div class="post-comment-item replyable" data-comment-user="${escapeHTML(String(comment.user_id ?? ""))}" data-comment-username="${escapeHTML(uname)}" title="Toque para responder">
+        <strong>@${escapeHTML(uname)} ${getBadgesHTML(comment.profiles)}:</strong> ${mentionsHTML(comment.content)}
       </div>`;
+  }
+
+  function setReply(username, userId) {
+    const form = $("#postDetailContent .detail-comment-form");
+    const input = form?.querySelector("input");
+    if (!input) return;
+    const bar = $("#postDetailContent .reply-bar");
+    if (userId && state.user && String(userId) === String(state.user.id)) { input.focus(); return; }   // não menciona a si mesmo
+    let value = input.value;
+    const prev = form.dataset.replyTo;
+    if (prev && value.startsWith(`@${prev} `)) value = value.slice(prev.length + 2);
+    input.value = `@${username} ${value}`.slice(0, 300);
+    form.dataset.replyTo = username;
+    if (bar) { bar.querySelector("span").textContent = `Respondendo a @${username}`; bar.classList.remove("hidden"); }
+    input.focus({ preventScroll: true });
+    input.scrollIntoView({ block: "center", behavior: "smooth" });
+    const end = input.value.length;
+    try { input.setSelectionRange(end, end); } catch (e) {}
+  }
+
+  function clearReply(removeText = true) {
+    const form = $("#postDetailContent .detail-comment-form");
+    const input = form?.querySelector("input");
+    const prev = form?.dataset.replyTo;
+    if (!form) return;
+    if (removeText && input && prev && input.value.startsWith(`@${prev} `)) input.value = input.value.slice(prev.length + 2);
+    delete form.dataset.replyTo;
+    $("#postDetailContent .reply-bar")?.classList.add("hidden");
   }
 
   function ownerButtonsHTML(postId) {
@@ -1589,8 +1624,9 @@ document.addEventListener("DOMContentLoaded", () => {
     if (error) return toast(`Não foi possível comentar: ${formatError(error)}`);
 
     input.value = "";
+    clearReply(false);
     state.commentCounts[postId] = (state.commentCounts[postId] || 0) + 1;
-    const html = commentHTML({ content: text, profiles: state.profile });
+    const html = commentHTML({ content: text, profiles: state.profile, user_id: state.user.id });
     $$(`[data-comments-for="${postId}"]`).forEach(list => {
       list.querySelector(".no-comments")?.remove();
       list.insertAdjacentHTML("beforeend", html);
@@ -1819,6 +1855,12 @@ document.addEventListener("DOMContentLoaded", () => {
     if (e.target.closest(".btn-share-post")) return sharePost(postId);
     if (e.target.closest(".btn-edit-post")) return editPostCaption(postId);
     if (e.target.closest(".btn-delete-post")) return deletePost(postId);
+    const commentItem = e.target.closest(".post-comment-item");
+    if (commentItem) {
+      const post = findPost(postId);
+      if (post) openPostDetailModal(post, { replyTo: commentItem.dataset.commentUsername, replyUserId: commentItem.dataset.commentUser });
+      return;
+    }
     if (e.target.closest("video")) return; // os controles do vídeo funcionam normalmente
     if (e.target.closest(".view-all-comments") || e.target.closest(".post-image-container")) {
       const post = findPost(postId);
@@ -1870,6 +1912,7 @@ document.addEventListener("DOMContentLoaded", () => {
         <div class="post-comments-list detail-list" data-comments-for="${post.id}">
           ${comments.map(commentHTML).join("") || '<p class="no-comments">Nenhum comentário ainda.</p>'}
         </div>
+        <div class="reply-bar hidden"><span></span><button type="button" class="reply-cancel" aria-label="Cancelar resposta"><i class="fa-solid fa-xmark"></i></button></div>
         <form class="detail-comment-form" data-post-id="${post.id}">
           <input type="text" placeholder="Adicione um comentário..." required autocomplete="off" maxlength="300">
           <button class="btn primary compact" type="submit">Enviar</button>
@@ -1877,7 +1920,9 @@ document.addEventListener("DOMContentLoaded", () => {
       </div>`;
 
     openModal("postDetailModal");
-    if (opts.focusComment) {
+    if (opts.replyTo) {
+      setTimeout(() => setReply(opts.replyTo, opts.replyUserId), 80);
+    } else if (opts.focusComment) {
       setTimeout(() => {
         const input = $("#postDetailContent .detail-comment-form input");
         if (!input) return;
@@ -1896,6 +1941,9 @@ document.addEventListener("DOMContentLoaded", () => {
   on("#postDetailContent", "click", (e) => {
     const id = state.detailPostId;
     if (id === null || id === undefined) return;
+    if (e.target.closest(".reply-cancel")) return clearReply();
+    const commentItem = e.target.closest(".post-comment-item");
+    if (commentItem) return setReply(commentItem.dataset.commentUsername, commentItem.dataset.commentUser);
     if (e.target.closest(".btn-like-post")) return toggleLike(id);
     if (e.target.closest(".btn-comment-post")) return $("#postDetailContent .detail-comment-form input")?.focus();
     if (e.target.closest(".btn-share-post")) return sharePost(id);
@@ -1908,6 +1956,12 @@ document.addEventListener("DOMContentLoaded", () => {
         openUserProfile(post.profiles);
       }
     }
+  });
+
+  on("#postDetailContent", "input", (e) => {
+    const form = e.target.closest(".detail-comment-form");
+    const prev = form?.dataset.replyTo;
+    if (prev && !e.target.value.startsWith(`@${prev}`)) clearReply(false);
   });
 
   on("#postDetailContent", "submit", (e) => {
@@ -2397,20 +2451,24 @@ document.addEventListener("DOMContentLoaded", () => {
     if (b) openBuyCoinsModal(parseInt(b.dataset.buyCoins, 10));
   });
 
-  function bannerCardHTML(item) {
+  function bannerActionHTML(item) {
     const owned = store.owned.has(item.id);
     const equipped = state.profile?.banner_url === item.media_url;
-    const media = (item.media_type === "video" || isVideoUrl(item.media_url))
-      ? `<video src="${escapeHTML(item.media_url)}" muted loop autoplay playsinline preload="metadata"></video>`
-      : `<img src="${escapeHTML(item.media_url)}" alt="${escapeHTML(item.name)}" loading="lazy">`;
-    const action = equipped
+    return equipped
       ? `<button class="btn secondary compact" disabled><i class="fa-solid fa-check"></i> Em uso</button>`
       : owned
         ? `<button class="btn primary compact" data-equip="${item.id}">Usar no perfil</button>`
         : `<button class="btn primary compact" data-buy-item="${item.id}">Comprar • <i class="fa-solid fa-coins"></i> ${Number(item.price).toLocaleString("pt-BR")}</button>`;
+  }
+
+  function bannerCardHTML(item) {
+    const media = (item.media_type === "video" || isVideoUrl(item.media_url))
+      ? `<video src="${escapeHTML(item.media_url)}" muted loop playsinline preload="metadata"></video>`
+      : `<img src="${escapeHTML(item.media_url)}" alt="${escapeHTML(item.name)}" loading="lazy" decoding="async">`;
+    const action = bannerActionHTML(item);
     return `
       <div class="store-card">
-        <div class="store-preview"><span class="store-tag">ANIMADO</span>${media}</div>
+        <div class="store-preview" data-preview-item="${item.id}" role="button" tabindex="0" aria-label="Ver preview de ${escapeHTML(item.name)}"><span class="store-tag">ANIMADO</span>${media}<span class="store-eye"><i class="fa-solid fa-eye"></i> Preview</span></div>
         <div class="store-body">
           <h3>${escapeHTML(item.name)}</h3>
           ${item.description ? `<p>${escapeHTML(item.description)}</p>` : ""}
@@ -2425,7 +2483,49 @@ document.addEventListener("DOMContentLoaded", () => {
     box.innerHTML = store.items.length
       ? store.items.map(bannerCardHTML).join("")
       : `<div class="empty-state" style="grid-column:1/-1"><i class="fa-regular fa-image"></i><p>Nenhum banner disponível ainda.</p></div>`;
+    $$("video", box).forEach(v => storeVideoObserver?.observe(v));
   }
+
+  // Banners em vídeo só tocam enquanto aparecem na tela (poupa CPU/bateria e dados).
+  const storeVideoObserver = "IntersectionObserver" in window
+    ? new IntersectionObserver((entries) => entries.forEach(en => {
+        if (en.isIntersecting) en.target.play().catch(() => {}); else en.target.pause();
+      }), { threshold: 0.35 })
+    : null;
+
+  /* ----- Preview do banner animado (como ficaria no seu perfil) ----- */
+  let previewItemId = null;
+  function openBannerPreview(id) {
+    const item = store.items.find(i => String(i.id) === String(id));
+    if (!item) return;
+    previewItemId = item.id;
+    const me = state.profile;
+    applyBanner($("#bannerPreviewCover"), item.media_url);
+    $("#bannerPreviewTitle").textContent = item.name;
+    $("#bannerPreviewDesc").textContent = item.description || "";
+    $("#bannerPreviewDesc").classList.toggle("hidden", !item.description);
+    $("#bannerPreviewAvatar").innerHTML = renderAvatarHTML(me, "large");
+    $("#bannerPreviewName").innerHTML = `${escapeHTML(me?.display_name || me?.username || "Seu perfil")}${getBadgesHTML(me)}`;
+    $("#bannerPreviewUser").textContent = me?.username ? `@${me.username}` : "@usuario";
+    $("#bannerPreviewActions").innerHTML = bannerActionHTML(item);
+    openModal("bannerPreviewModal");
+  }
+  function closeBannerPreview() {
+    previewItemId = null;
+    applyBanner($("#bannerPreviewCover"), "");   // para o vídeo/animação
+    closeModal("bannerPreviewModal");
+  }
+  on("#closeBannerPreview", "click", closeBannerPreview);
+  on("#bannerPreviewModal", "click", (e) => { if (e.target.id === "bannerPreviewModal") closeBannerPreview(); });
+  on("#storeBanners", "click", (e) => {
+    const prev = e.target.closest("[data-preview-item]");
+    if (prev) openBannerPreview(prev.dataset.previewItem);
+  });
+  on("#storeBanners", "keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const prev = e.target.closest("[data-preview-item]");
+    if (prev) { e.preventDefault(); openBannerPreview(prev.dataset.previewItem); }
+  });
 
   async function loadStore() {
     renderCoinPacks();
@@ -2449,7 +2549,7 @@ document.addEventListener("DOMContentLoaded", () => {
     renderBanners();
   }
 
-  on("#storeBanners", "click", async (e) => {
+  async function handleBannerAction(e) {
     const buy = e.target.closest("[data-buy-item]");
     const equip = e.target.closest("[data-equip]");
     if (!buy && !equip) return;
@@ -2482,7 +2582,10 @@ document.addEventListener("DOMContentLoaded", () => {
       renderBanners();
       toast("Banner aplicado ao seu perfil!");
     }
-  });
+    if (previewItemId !== null) closeBannerPreview();
+  }
+  on("#storeBanners", "click", handleBannerAction);
+  on("#bannerPreviewActions", "click", handleBannerAction);
 
   /* ----- Admin: publicar banner na loja ----- */
   let storeItemFile = null;
@@ -4045,13 +4148,16 @@ document.addEventListener("DOMContentLoaded", () => {
           ? `<strong>${escapeHTML(n.actor.display_name || n.actor.username)}${getBadgesHTML(n.actor)}</strong> `
           : "";
         return `
-          <div class="notif-item ${n.read_at ? "" : "unread"}" data-type="${n.type}" data-post-id="${n.post_id || ""}" data-actor-id="${n.actor_id || ""}">
-            ${leading}
-            <div class="grow">
-              <p>${who}${notificationText(n)}</p>
-              <small>${formatTimeAgo(n.created_at)}</small>
+          <div class="notif-swipe" data-notif-id="${n.id}">
+            <div class="notif-swipe-bg" aria-hidden="true"><i class="fa-solid fa-trash"></i></div>
+            <div class="notif-item ${n.read_at ? "" : "unread"}" data-type="${n.type}" data-post-id="${n.post_id || ""}" data-actor-id="${n.actor_id || ""}">
+              ${leading}
+              <div class="grow">
+                <p>${who}${notificationText(n)}</p>
+                <small>${formatTimeAgo(n.created_at)}</small>
+              </div>
+              ${n.actor ? `<span class="notif-type ${tone}"><i class="${iconClass}"></i></span>` : ""}
             </div>
-            ${n.actor ? `<span class="notif-type ${tone}"><i class="${iconClass}"></i></span>` : ""}
           </div>`;
       }).join("");
     }
@@ -4085,6 +4191,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const item = e.target.closest(".notif-item");
     if (!item) return;
+    if (Date.now() - notifSwipeEndedAt < 350) return;   // era um arrasto, não um toque
     const { type, postId, actorId } = item.dataset;
 
     if ((type === "like" || type === "comment") && postId) {
@@ -4096,6 +4203,87 @@ document.addEventListener("DOMContentLoaded", () => {
       if (actor) openUserProfile(actor);
     }
   });
+
+  /* ----- Arrastar a notificação para o lado para excluir ----- */
+  let notifSwipeEndedAt = 0;
+  (function setupNotifSwipe() {
+    const box = $("#notificationsList");
+    if (!box) return;
+    const THRESHOLD = 0.35;          // fração da largura necessária para excluir
+    let g = null;                    // gesto em andamento
+
+    const reset = (row, item) => {
+      item.style.transition = "transform .22s ease";
+      item.style.transform = "";
+      row.classList.remove("swiping", "will-delete");
+    };
+
+    async function removeRow(row, item, dir) {
+      const id = row.dataset.notifId;
+      row.style.height = row.offsetHeight + "px";
+      item.style.transition = "transform .22s ease, opacity .22s ease";
+      item.style.transform = `translateX(${dir * row.offsetWidth}px)`;
+      item.style.opacity = "0";
+      row.classList.add("removing");
+      await new Promise(r => setTimeout(r, 200));
+      const { error } = await db.from(NOTIF_TABLE).delete().eq("id", id).eq("user_id", state.user.id);
+      if (error) {                                   // não deixou excluir (ex.: política do Supabase): volta ao lugar
+        row.classList.remove("removing");
+        row.style.height = "";
+        item.style.opacity = "";
+        reset(row, item);
+        toast(`Não foi possível excluir: ${formatError(error)}`);
+        return;
+      }
+      row.style.height = "0px";
+      setTimeout(() => {
+        row.remove();
+        if (!box.querySelector(".notif-swipe")) {
+          [...box.querySelectorAll(".notif-section-title")].pop()?.remove();   // título "ATIVIDADE"
+          if (!box.querySelector(".notif-item, .admin-notification-card")) {
+            box.innerHTML = `<div class="empty-state"><i class="fa-regular fa-bell"></i><p>Nenhuma notificação no momento.</p></div>`;
+          }
+        }
+      }, 220);
+    }
+
+    box.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      const item = e.target.closest(".notif-swipe > .notif-item");
+      if (!item || state.visitor) return;
+      g = { row: item.parentElement, item, x: e.clientX, y: e.clientY, dx: 0, active: false, id: e.pointerId };
+    });
+
+    box.addEventListener("pointermove", (e) => {
+      if (!g || e.pointerId !== g.id) return;
+      const dx = e.clientX - g.x, dy = e.clientY - g.y;
+      if (!g.active) {
+        if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) { g = null; return; }   // é rolagem vertical
+        if (Math.abs(dx) < 8) return;
+        g.active = true;
+        g.row.classList.add("swiping");
+        g.item.style.transition = "none";
+        try { box.setPointerCapture(e.pointerId); } catch (_) {}
+      }
+      g.dx = dx;
+      g.item.style.transform = `translateX(${dx}px)`;
+      g.row.classList.toggle("will-delete", Math.abs(dx) > g.row.offsetWidth * THRESHOLD);
+      g.row.dataset.dir = dx < 0 ? "left" : "right";
+    });
+
+    const end = (e) => {
+      if (!g || e.pointerId !== g.id) return;
+      const { row, item, dx, active } = g;
+      g = null;
+      if (!active) return;
+      notifSwipeEndedAt = Date.now();
+      try { box.releasePointerCapture(e.pointerId); } catch (_) {}
+      if (e.type !== "pointercancel" && Math.abs(dx) > row.offsetWidth * THRESHOLD) removeRow(row, item, dx < 0 ? -1 : 1);
+      else reset(row, item);
+    };
+    box.addEventListener("pointerup", end);
+    box.addEventListener("pointercancel", end);
+  })();
 
   async function refreshUnreadCounts() {
     if (!db || !state.user) return;
@@ -4251,13 +4439,15 @@ document.addEventListener("DOMContentLoaded", () => {
   // Rede de segurança: se o tempo real não estiver ativo no Supabase, a tela ainda atualiza.
   function startPolling() {
     stopPolling();
+    let tick = 0;
     pollTimer = setInterval(() => {
       if (document.hidden || !state.user) return;
+      tick++;
       refreshUnreadCounts();
       markDelivered();
       if (state.currentPage === "pageChatRoom") fetchAndRenderMessages({ silent: true });
-      if (state.currentPage === "pageTrending") loadTrending();
-    }, 10000);
+      if (state.currentPage === "pageTrending" && tick % 3 === 0) loadTrending();   // tempo real já cobre o resto
+    }, 15000);
   }
 
   function stopPolling() {
@@ -4832,7 +5022,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const ADMIN_TABS = {
     users: {
       q: () => db.from("profiles").select("*").order("created_at", { ascending: false }).limit(200),
-      row: u => `${escapeHTML(u.display_name || u.username)}${getBadgesHTML(u)} <small>@${escapeHTML(u.username || "")}${u.is_admin ? " • ADMIN" : ""}${u.is_banned ? " • BANIDO" : ""} • 🪙 ${u.wallet_balance || 0}</small>`,
+      // A tabela profiles pode não ter a coluna created_at: sem ela o order() derruba a consulta inteira.
+      q2: () => db.from("profiles").select("*").limit(200),
+      row: u => `${escapeHTML(u.display_name || u.username || "Sem nome")}${getBadgesHTML(u)} <small>@${escapeHTML(u.username || "")}${u.is_admin ? " • ADMIN" : ""}${u.is_banned ? " • BANIDO" : ""} • 🪙 ${u.wallet_balance || 0}</small>`,
       acts: u => [["verified", u.is_verified ? "Tirar ✔" : "Dar ✔"], ["dev", u.is_developer ? "Tirar Dev" : "Dar Dev"], ["admin", u.is_admin ? "Tirar Admin" : "Dar Admin"], ["coins", "Moedas"], ["ban", u.is_banned ? "Desbanir" : "Banir"], ["edit", "Editar"], ["deluser", "Excluir"]]
     },
     posts: {
@@ -4870,9 +5062,16 @@ document.addEventListener("DOMContentLoaded", () => {
     const box = $("#adminContent");
     box.innerHTML = `<div class="empty-state"><p>Carregando...</p></div>`;
     const cfg = ADMIN_TABS[tab];
-    const { data, error } = await cfg.q();
-    if (error) { box.innerHTML = `<div class="empty-state"><p>${escapeHTML(formatError(error))}</p></div>`; return; }
+    let { data, error } = await cfg.q();
+    if (error && cfg.q2) ({ data, error } = await cfg.q2());   // tenta de novo sem ordenar por created_at
+    if (tab !== adminTab) return;                              // trocou de aba enquanto carregava
+    if (error) {
+      const rls = /permission|policy|row-level|rls/i.test(error.message || "");
+      box.innerHTML = `<div class="empty-state"><p>${escapeHTML(formatError(error))}</p>${rls ? "<small>O Supabase está bloqueando a leitura (RLS). Rode o SQL de políticas do admin.</small>" : ""}</div>`;
+      return;
+    }
     adminRows = data || [];
+    if (tab === "users") adminRows.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")) || String(a.username || "").localeCompare(String(b.username || "")));
     box.innerHTML = adminRows.map(r => `<div class="result-card" style="flex-wrap:wrap;gap:8px" data-id="${r.id}">
       <div class="grow">${cfg.row(r)}</div>
       <div style="display:flex;gap:6px;flex-wrap:wrap">${cfg.acts(r).map(([a, t]) => `<button class="btn secondary compact" data-act="${a}">${t}</button>`).join("")}</div></div>`).join("")
