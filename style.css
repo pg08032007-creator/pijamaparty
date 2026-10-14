@@ -1777,9 +1777,6 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .8; }
 /* =========================================================
    Melhorias: desempenho, preview de banner, respostas e swipe
 ========================================================= */
-/* Cards do feed fora da tela não são desenhados até chegarem perto (rolagem mais leve). */
-#feedPosts .post-card { content-visibility: auto; contain-intrinsic-size: auto 560px; }
-
 /* Preview de banner na loja */
 .store-preview[data-preview-item] { cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .store-eye {
