@@ -1772,3 +1772,52 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .8; }
 .skeleton-media { height: 260px; border-radius: 14px; }
 @keyframes skeletonShimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 @media (prefers-reduced-motion: reduce) { .skeleton-line, .skeleton-media { animation: none; } }
+
+
+/* =========================================================
+   Melhorias: desempenho, preview de banner, respostas e swipe
+========================================================= */
+/* Cards do feed fora da tela não são desenhados até chegarem perto (rolagem mais leve). */
+#feedPosts .post-card { content-visibility: auto; contain-intrinsic-size: auto 560px; }
+
+/* Preview de banner na loja */
+.store-preview[data-preview-item] { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.store-eye {
+  position: absolute; right: 8px; bottom: 8px; z-index: 2; display: inline-flex; align-items: center; gap: 5px;
+  background: rgba(0,0,0,.65); color: #fff; font-size: .66rem; font-weight: 700; padding: 4px 9px; border-radius: 99px;
+}
+.banner-preview-card { width: min(100%, 460px); }
+.banner-preview-stage { border: 1px solid var(--border); border-radius: 16px; overflow: hidden; background: var(--surface-2); }
+.banner-preview-me { padding: 0 16px 16px; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.banner-preview-me > div { margin-top: -36px; margin-bottom: 6px; }
+.banner-preview-me h3 { margin: 0; font-size: 1rem; }
+.banner-preview-me small { color: var(--muted); }
+.banner-preview-desc { margin: 12px 0 0; color: var(--text-soft); font-size: .85rem; }
+#bannerPreviewModal .modal-actions { margin-top: 14px; justify-content: flex-end; }
+
+/* Responder comentários */
+.post-comment-item.replyable { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.detail-list .post-comment-item.replyable { padding: 6px 8px; margin: 0 -8px; border-radius: 10px; transition: background .15s ease; }
+.detail-list .post-comment-item.replyable:active { background: var(--surface-2); }
+.mention { color: var(--primary); font-weight: 600; }
+.reply-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; padding: 6px 12px;
+  border-radius: 10px; background: var(--surface-2); color: var(--text-soft); font-size: .76rem;
+}
+.reply-bar.hidden { display: none; }
+.reply-bar .reply-cancel { background: none; border: 0; color: inherit; cursor: pointer; padding: 4px; }
+.reply-bar + .detail-comment-form { margin-top: 6px; }
+
+/* Arrastar notificação para excluir */
+.notif-swipe { position: relative; overflow: hidden; background: var(--danger-text, #ff4d5e); transition: height .22s ease, opacity .22s ease; }
+.notif-swipe .notif-item { background: var(--bg, var(--surface)); touch-action: pan-y; will-change: transform; }
+.notif-swipe .notif-item.unread { background: linear-gradient(rgba(255,42,95,.07), rgba(255,42,95,.07)), var(--bg, var(--surface)); }
+.notif-swipe-bg {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: flex-end; padding: 0 24px;
+  color: #fff; font-size: 1.1rem; opacity: 0; transition: opacity .15s ease;
+}
+.notif-swipe[data-dir="right"] .notif-swipe-bg { justify-content: flex-start; }
+.notif-swipe.swiping .notif-swipe-bg, .notif-swipe.removing .notif-swipe-bg { opacity: .75; }
+.notif-swipe.will-delete .notif-swipe-bg { opacity: 1; }
+.notif-swipe.swiping .notif-item { cursor: grabbing; user-select: none; -webkit-user-select: none; }
+.notif-swipe.removing { opacity: .6; }
