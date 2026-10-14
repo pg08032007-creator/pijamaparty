@@ -863,6 +863,26 @@
     </div>
   </div>
 
+  <!-- LOJA: PREVIEW DO BANNER ANIMADO -->
+  <div class="modal" id="bannerPreviewModal" inert>
+    <div class="modal-card banner-preview-card">
+      <div class="modal-header">
+        <h2 id="bannerPreviewTitle">Preview</h2>
+        <button class="icon-btn ghost" id="closeBannerPreview" type="button" aria-label="Fechar"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="banner-preview-stage">
+        <div class="profile-cover" id="bannerPreviewCover"></div>
+        <div class="banner-preview-me">
+          <div id="bannerPreviewAvatar"></div>
+          <h3 id="bannerPreviewName"></h3>
+          <small id="bannerPreviewUser"></small>
+        </div>
+      </div>
+      <p class="banner-preview-desc hidden" id="bannerPreviewDesc"></p>
+      <div class="modal-actions" id="bannerPreviewActions"></div>
+    </div>
+  </div>
+
   <!-- CONFIRMAÇÃO -->
   <div class="modal" id="confirmModal" inert role="alertdialog" aria-labelledby="confirmTitle">
     <div class="modal-card confirm-card">
@@ -876,6 +896,6 @@
     </div>
   </div>
 
-  <script src="script.js"></script>
+  <script src="script.js" defer></script>
 </body>
 </html>
