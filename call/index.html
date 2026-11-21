@@ -50,6 +50,7 @@
     color:#bcd0ff;background:rgba(91,140,255,.12);
     border:1px solid rgba(91,140,255,.28);
     padding:7px 14px;border-radius:999px;margin-bottom:18px;
+    transition:color .2s ease,background .2s ease,border-color .2s ease;
   }
   .badge .pulse{
     width:7px;height:7px;border-radius:50%;background:#38d39f;
@@ -61,6 +62,19 @@
     70%{box-shadow:0 0 0 10px rgba(56,211,159,0)}
     100%{box-shadow:0 0 0 0 rgba(56,211,159,0)}
   }
+  .badge.full{
+    color:#ffd0d0;background:rgba(239,68,68,.12);
+    border-color:rgba(239,68,68,.32);
+  }
+  .badge.full .pulse{
+    background:var(--danger);
+    animation:pulseRed 1.8s infinite;
+  }
+  @keyframes pulseRed{
+    0%{box-shadow:0 0 0 0 rgba(239,68,68,.55)}
+    70%{box-shadow:0 0 0 10px rgba(239,68,68,0)}
+    100%{box-shadow:0 0 0 0 rgba(239,68,68,0)}
+  }
   h1{font-size:30px;line-height:1.15;margin:0 0 12px;letter-spacing:-.02em}
   .lead{color:var(--muted);font-size:15px;line-height:1.6;margin:0 0 26px}
   .btn{
@@ -70,10 +84,18 @@
     background:linear-gradient(135deg,var(--accent),var(--accent2));
     width:100%;font-size:16px;
     box-shadow:0 12px 30px rgba(91,140,255,.35);
-    transition:transform .15s ease,box-shadow .15s ease,opacity .15s ease;
+    transition:transform .15s ease,box-shadow .25s ease,background .25s ease,opacity .15s ease;
   }
   .btn:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 16px 38px rgba(91,140,255,.45)}
   .btn:disabled{opacity:.55;cursor:default}
+
+  /* Botão vermelho: as duas vagas já estão ocupadas -> modo espectador */
+  .btn.danger{
+    background:linear-gradient(135deg,#ef4444,#b91c1c);
+    box-shadow:0 12px 30px rgba(239,68,68,.38);
+  }
+  .btn.danger:hover:not(:disabled){box-shadow:0 16px 38px rgba(239,68,68,.52)}
+
   .note{font-size:12.5px;color:var(--muted);margin:18px 0 0;line-height:1.55}
   .err{
     margin-top:16px;font-size:13.5px;line-height:1.5;color:#ffd0d0;
@@ -226,7 +248,7 @@
   <!-- Tela inicial -->
   <section class="lobby" id="lobby">
     <div class="card">
-      <div class="badge"><span class="pulse"></span> Sala aberta</div>
+      <div class="badge" id="lobbyBadge"><span class="pulse"></span><span id="lobbyBadgeText">Sala aberta</span></div>
       <h1>Entrar na videochamada</h1>
       <p class="lead">
         Clique no botão e você já cai na chamada com a primeira pessoa que estiver na sala.
@@ -237,7 +259,8 @@
         É preciso permitir o acesso à câmera e ao microfone. O vídeo é transmitido direto
         entre os participantes (ponto a ponto), sem passar por servidores de gravação.
         A partir da terceira pessoa, a entrada é anônima: ninguém vê quem entrou nem
-        quantas pessoas estão assistindo.
+        quantas pessoas estão assistindo. Quando as duas vagas da chamada já estiverem
+        ocupadas, o botão fica vermelho e a entrada passa a ser como espectador.
       </p>
       <div class="err" id="lobbyErr" hidden></div>
     </div>
@@ -431,6 +454,12 @@
   var connectingToHost = false;
   var watchStates = {};
 
+  // Estado do lobby: as duas cadeiras já estão ocupadas?
+  var lobbySeatsFull = false;
+  var probingSeats = false;
+  var lobbyWatchTimer = null;
+  var usingRetryLabel = false;
+
   /* ------------------------------------------------------------------ *
    *  Elementos
    * ------------------------------------------------------------------ */
@@ -440,6 +469,8 @@
   var room = el("room");
   var joinBtn = el("joinBtn");
   var lobbyErr = el("lobbyErr");
+  var lobbyBadge = el("lobbyBadge");
+  var lobbyBadgeText = el("lobbyBadgeText");
   var statusEl = el("status");
   var liveDot = el("liveDot");
   var grid = el("grid");
@@ -471,6 +502,7 @@
   }
 
   function resetJoinButton() {
+    usingRetryLabel = true;
     joinBtn.disabled = false;
     joinBtn.textContent = "Tentar novamente";
   }
@@ -500,8 +532,10 @@
   function engineReady(ok) {
     if (ok) {
       hideError();
+      usingRetryLabel = false;
       joinBtn.disabled = false;
-      joinBtn.textContent = "Entrar na videochamada";
+      updateLobbyUi();
+      startLobbySeatWatch();
     } else {
       engineFailed();
     }
@@ -573,930 +607,4 @@
           settle({ error: err || { type: type } });
           return;
         }
-        // Erro desconhecido: deixa o timeout decidir, mas libera o peer.
-        settle({ error: err || { type: "unknown" } });
-      });
-    });
-  }
-
-  // Espectador anônimo: tenta algumas vezes um ID aleatório livre.
-  function claimAnonymousPeer() {
-    return new Promise(function (resolve) {
-      var attempts = 0;
-
-      function attempt() {
-        attempts++;
-        if (attempts > 5) {
-          resolve(null);
-          return;
-        }
-
-        var p = new Peer(randomPeerId(), PEER_OPTIONS);
-        var settled = false;
-
-        function done(value) {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          resolve(value);
-        }
-
-        var timer = setTimeout(function () {
-          if (settled) return;
-          try { p.destroy(); } catch (e) {}
-          done({ error: { type: "timeout" } });
-        }, 10000);
-
-        p.on("open", function () { done(p); });
-
-        p.on("error", function (err) {
-          if (settled) return;
-          var type = err && err.type;
-          try { p.destroy(); } catch (e) {}
-          if (type === "unavailable-id") {
-            // Extremamente raro, mas tenta outro ID aleatório.
-            attempt();
-            return;
-          }
-          done({ error: err || { type: type } });
-        });
-      }
-
-      attempt();
-    });
-  }
-
-  /* ------------------------------------------------------------------ *
-   *  Entrada na sala
-   * ------------------------------------------------------------------ */
-
-  function joinFailed(error) {
-    joining = false;
-    try { if (peer) peer.destroy(); } catch (e) {}
-    peer = null;
-    resetJoinButton();
-
-    var type = (error && error.type) || "";
-    if (type === "browser-incompatible") {
-      showError("Este navegador não suporta chamadas de vídeo. Use Chrome, Edge, Safari ou Firefox atualizados.");
-    } else if (type === "timeout" || type === "network" || type === "server-error" || type === "socket-error") {
-      showError("Não foi possível conectar ao serviço da sala. Verifique sua internet e tente de novo.");
-    } else {
-      showError("Não foi possível entrar na sala agora. Tente novamente.");
-    }
-  }
-
-  async function joinRoom() {
-    if (joining) return;
-
-    joining = true;
-    hideError();
-    joinBtn.disabled = true;
-    joinBtn.textContent = "Entrando…";
-
-    var engineOk = await ensureEngine();
-    if (!engineOk) {
-      joining = false;
-      engineFailed();
-      return;
-    }
-
-    // 1) Tenta uma das duas cadeiras de participante.
-    for (var i = 0; i < PARTICIPANT_SEATS; i++) {
-      var result = await claimSeat(i);
-      if (result && result.error) {
-        joinFailed(result.error);
-        return;
-      }
-      if (result) {
-        mySeat = i;
-        peer = result;
-        break;
-      }
-    }
-
-    // 2) Cadeiras ocupadas: entra como espectador anônimo.
-    if (!peer) {
-      var anon = await claimAnonymousPeer();
-      if (!anon || anon.error) {
-        joinFailed((anon && anon.error) || { type: "timeout" });
-        return;
-      }
-      peer = anon;
-      mySeat = -1;
-    }
-
-    isSpectator = mySeat < 0;
-
-    peer.on("error", handlePeerError);
-    peer.on("disconnected", function () {
-      setStatus("Conexão instável, tentando reconectar…", true);
-      try { peer.reconnect(); } catch (e) {}
-    });
-    peer.on("close", function () {
-      // Peer encerrado: só avisa se ainda estivermos na sala.
-      if (room && !room.hidden) setStatus("Você saiu da sala", true);
-    });
-
-    lobby.hidden = true;
-    room.hidden = false;
-    joining = false;
-
-    if (isSpectator) {
-      startAsSpectator();
-    } else {
-      await startAsParticipant();
-    }
-  }
-
-  function handlePeerError(err) {
-    var type = err && err.type;
-
-    if (type === "peer-unavailable") {
-      // Esperado enquanto a outra pessoa não entrou; tratado no fluxo de chamada.
-      return;
-    }
-    if (type === "network" || type === "server-error" || type === "socket-error") {
-      setStatus("Conexão com o servidor da sala caiu. Tentando reconectar…", true);
-      try { peer.reconnect(); } catch (e) {}
-      return;
-    }
-    if (type === "browser-incompatible") {
-      setStatus("Este navegador não suporta chamadas de vídeo", true);
-    }
-  }
-
-  /* ------------------------------------------------------------------ *
-   *  Câmera / microfone (só participantes)
-   * ------------------------------------------------------------------ */
-
-  async function openMedia() {
-    if (localStream) return localStream;
-
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      throw new Error("unsupported");
-    }
-
-    localStream = await navigator.mediaDevices.getUserMedia(MEDIA_CONSTRAINTS);
-
-    localStream.getVideoTracks().forEach(function (t) {
-      // Prioriza fluidez (menos travamento) em vez de estourar resolução.
-      try { t.contentHint = "motion"; } catch (e) {}
-    });
-
-    return localStream;
-  }
-
-  function mediaErrorMessage(err) {
-    var name = err && err.name;
-    if (name === "NotAllowedError" || name === "SecurityError") {
-      return "O acesso à câmera/microfone foi bloqueado. Autorize nas configurações do navegador para este site e tente novamente.";
-    }
-    if (name === "NotFoundError" || name === "OverconstrainedError") {
-      return "Nenhuma câmera ou microfone foi encontrado neste dispositivo.";
-    }
-    if (name === "NotReadableError") {
-      return "Sua câmera está em uso por outro programa. Feche-o e tente novamente.";
-    }
-    return "Não foi possível ligar a câmera e o microfone. Tente novamente.";
-  }
-
-  async function startAsParticipant() {
-    try {
-      await openMedia();
-    } catch (err) {
-      setStatus("Não consegui acessar sua câmera", true);
-      room.hidden = true;
-      lobby.hidden = false;
-      resetJoinButton();
-      showError(mediaErrorMessage(err));
-      try { peer.destroy(); } catch (e) {}
-      peer = null;
-      return;
-    }
-
-    var selfTile = addTile("Você", true);
-    attachStream(selfTile, localStream);
-    updateMicCamButtons();
-
-    peer.on("call", handleIncomingCall);
-    peer.on("connection", handleIncomingChatConn);
-    connectChat(false);
-
-    // Quem chega primeiro espera; quem chega depois liga para a cadeira anterior.
-    if (mySeat === 0) {
-      addWaitingTile(
-        "Esperando alguém entrar…",
-        "Compartilhe o link para a segunda pessoa cair direto na chamada com você."
-      );
-      setStatus("Você é o primeiro na sala. Aguardando alguém entrar…");
-    } else {
-      setStatus("Entrando na chamada com a primeira pessoa…");
-      connectAsSecondParticipant();
-    }
-  }
-
-  // Segunda pessoa: liga para a cadeira 0 e tenta de novo até conseguir.
-  function connectAsSecondParticipant() {
-    if (!peer || peer.destroyed || connectingToHost) return;
-
-    connectingToHost = true;
-    var call = peer.call(seatId(0), localStream, { metadata: { role: "participant" } });
-
-    if (!call) {
-      connectingToHost = false;
-      scheduleRetry(connectAsSecondParticipant, 3000);
-      return;
-    }
-
-    var tile = null;
-    var finished = false;
-
-    function retry(delay) {
-      connectingToHost = false;
-      if (finished) return;
-      finished = true;
-      try { call.close(); } catch (e) {}
-      if (tile) {
-        tile.remove();
-        tile = null;
-        syncGrid();
-      }
-      if (!peer || peer.destroyed) return;
-      scheduleRetry(connectAsSecondParticipant, delay);
-    }
-
-    call.on("stream", function (remote) {
-      if (finished) return;
-      if (!tile) tile = addTile("Outra pessoa", false);
-      attachStream(tile, remote);
-      removeWaitingTiles();
-      setStatus("Chamada em andamento — vídeo em alta qualidade");
-      tuneSenders(call, BITRATE_FULL);
-    });
-
-    call.on("error", function () { retry(4000); });
-
-    call.on("close", function () {
-      retry(4000);
-      setStatus("A outra pessoa saiu da chamada", true);
-    });
-
-    setTimeout(function () {
-      // Sem vídeo em 8s: encerra e tenta de novo (sem deixar tile fantasma).
-      if (!tile) retry(4000);
-    }, 8000);
-  }
-
-  // Participante recebe a ligação (da outra pessoa ou de um espectador).
-  function handleIncomingCall(call) {
-    if (!localStream) {
-      try { call.close(); } catch (e) {}
-      return;
-    }
-
-    var role = (call.metadata && call.metadata.role) || "participant";
-
-    try {
-      call.answer(localStream);
-    } catch (e) {
-      return;
-    }
-
-    if (role === "viewer") {
-      registerViewer(call);
-      return;
-    }
-
-    var tile = addTile("Outra pessoa", false);
-
-    call.on("stream", function (remote) {
-      attachStream(tile, remote);
-      removeWaitingTiles();
-      setStatus("Chamada em andamento — vídeo em alta qualidade");
-      tuneSenders(call, BITRATE_FULL);
-    });
-
-    call.on("close", function () {
-      tile.remove();
-      syncGrid();
-      setStatus("A outra pessoa saiu da chamada", true);
-      if (mySeat === 0) {
-        addWaitingTile(
-          "Esperando alguém entrar…",
-          "Compartilhe o link para a segunda pessoa cair direto na chamada com você."
-        );
-      }
-    });
-  }
-
-  /* ------------------------------------------------------------------ *
-   *  Modo espectador anônimo (3ª pessoa em diante)
-   * ------------------------------------------------------------------ */
-
-  function startAsSpectator() {
-    // Espectador não abre câmera nem microfone: nada é transmitido.
-    var dummy = createSilentStream();
-
-    var badge = addTile("Você está assistindo", true, false);
-    badge.classList.add("spectator-self");
-
-    var info = document.createElement("div");
-    info.className = "waiting";
-    info.innerHTML =
-      '<div class="spinner"></div>' +
-      "<div>Modo espectador<br><span style='font-size:12.5px;opacity:.8'>" +
-      "Você assiste as telas sem ligar câmera nem microfone e sem aparecer para ninguém." +
-      "</span></div>";
-    badge.appendChild(info);
-
-    setStatus("Modo espectador — assistindo de forma anônima…");
-
-    micBtn.disabled = true;
-    camBtn.disabled = true;
-    micBtn.textContent = "🎙️ Microfone off";
-    camBtn.textContent = "🎥 Câmera off";
-    micBtn.classList.add("off");
-    camBtn.classList.add("off");
-
-    // Espectador não pode enviar mensagens: isso revelaria que ele está aqui.
-    chatBtn.disabled = true;
-    chatBtn.title = "Modo espectador: envio de mensagens indisponível";
-    chatBtn.textContent = "💬 Mensagens off";
-    chatInput.disabled = true;
-    chatSendBtn.disabled = true;
-    chatInput.placeholder = "Modo espectador: você só assiste";
-
-    // Nenhum handler de "call": espectador não recebe chamadas e não é
-    // listado, contado ou identificado pelos participantes.
-
-    watchSeat(0, dummy);
-    watchSeat(1, dummy);
-  }
-
-  // Espectador liga para uma cadeira e fica tentando até conseguir.
-  function watchSeat(seat, dummy) {
-    if (!peer || peer.destroyed) return;
-
-    var st = watchStates[seat];
-    if (st && st.active) return;          // já existe tentativa/conexão em curso
-
-    st = watchStates[seat] = {
-      active: true,
-      tile: null,
-      retries: st ? st.retries : 0
-    };
-
-    var call = peer.call(seatId(seat), dummy, { metadata: { role: "viewer" } });
-
-    if (!call) {
-      st.active = false;
-      scheduleRetry(function () { watchSeat(seat, dummy); }, 4000);
-      return;
-    }
-
-    var finished = false;
-
-    function retryLater() {
-      if (finished) return;
-      finished = true;
-      st.active = false;
-      try { call.close(); } catch (e) {}
-      if (st.tile) {
-        st.tile.remove();
-        st.tile = null;
-        syncGrid();
-      }
-      if (!peer || peer.destroyed) return;
-
-      var wait = Math.min(4000 + st.retries * 2000, 15000);
-      st.retries++;
-      scheduleRetry(function () { watchSeat(seat, dummy); }, wait);
-    }
-
-    call.on("stream", function (remote) {
-      if (finished) return;
-      if (!st.tile) st.tile = addTile(seat === 0 ? "Pessoa 1" : "Pessoa 2", false);
-      attachStream(st.tile, remote);
-      removeSpectatorHints();
-      setStatus("Assistindo a chamada (modo espectador)");
-      st.retries = 0;
-    });
-
-    call.on("error", retryLater);
-    call.on("close", retryLater);
-
-    setTimeout(function () {
-      // Sem vídeo em 8s (cadeira vazia, por exemplo): tenta de novo depois.
-      if (!st.tile) retryLater();
-    }, 8000);
-  }
-
-  // Stream mínimo (2x2px, 1fps) só para negociar a conexão de quem assiste.
-  function createSilentStream() {
-    var canvas = document.createElement("canvas");
-    canvas.width = 2;
-    canvas.height = 2;
-    var ctx = canvas.getContext("2d");
-    if (ctx) {
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, 2, 2);
-    }
-    if (canvas.captureStream) return canvas.captureStream(1);
-    return new MediaStream();
-  }
-
-  /* ------------------------------------------------------------------ *
-   *  Espectadores vistos pelos participantes
-   *  (controle interno; nada é exibido — a entrada é anônima)
-   * ------------------------------------------------------------------ */
-
-  function registerViewer(call) {
-    if (viewerCalls.indexOf(call) === -1) viewerCalls.push(call);
-
-    call.on("close", function () {
-      var idx = viewerCalls.indexOf(call);
-      if (idx > -1) viewerCalls.splice(idx, 1);
-    });
-
-    tuneSenders(call, BITRATE_VIEWER);
-  }
-
-  /* ------------------------------------------------------------------ *
-   *  Mensagens de texto (opcionais, só entre os dois participantes)
-   *  Espectador não envia nada: continuar anônimo é a regra.
-   * ------------------------------------------------------------------ */
-
-  var chatConns = [];
-  var pendingChat = [];
-  var seenMessages = {};
-  var chatAttempts = 0;
-  var chatConnecting = false;
-  var chatUnread = 0;
-  var chatOpen = false;
-
-  function randomToken() {
-    var bytes = new Uint8Array(8);
-    if (window.crypto && window.crypto.getRandomValues) {
-      window.crypto.getRandomValues(bytes);
-    } else {
-      for (var i = 0; i < bytes.length; i++) {
-        bytes[i] = Math.floor(Math.random() * 256);
-      }
-    }
-    var out = "";
-    for (var j = 0; j < bytes.length; j++) {
-      out += ("0" + bytes[j].toString(16)).slice(-2);
-    }
-    return out;
-  }
-
-  function openChatConns() {
-    return chatConns.filter(function (c) { return c.conn.open; });
-  }
-
-  function findChatConn(peerId) {
-    for (var i = 0; i < chatConns.length; i++) {
-      var c = chatConns[i];
-      if (c.conn.peer === peerId && c.conn.open) return c.conn;
-    }
-    return null;
-  }
-
-  function removeChatConn(conn) {
-    chatConns = chatConns.filter(function (c) { return c.conn !== conn; });
-  }
-
-  function addChatConn(conn) {
-    for (var i = 0; i < chatConns.length; i++) {
-      if (chatConns[i].conn === conn) return;
-    }
-    chatConns.push({ conn: conn });
-
-    conn.on("data", handleChatData);
-    conn.on("close", function () {
-      removeChatConn(conn);
-      scheduleChatRetry();
-    });
-    conn.on("error", function () { removeChatConn(conn); });
-
-    flushChatQueue();
-  }
-
-  // Aceita conexão de mensagens apenas de quem está nas duas cadeiras.
-  function handleIncomingChatConn(conn) {
-    if (!conn) return;
-    if (isSpectator || (conn.peer !== seatId(0) && conn.peer !== seatId(1))) {
-      try { conn.close(); } catch (e) {}
-      return;
-    }
-    if (conn.open) addChatConn(conn);
-    else conn.on("open", function () { addChatConn(conn); });
-  }
-
-  function flushChatQueue() {
-    if (!pendingChat.length) return;
-    var open = openChatConns();
-    if (!open.length) return;
-    var queue = pendingChat;
-    pendingChat = [];
-    queue.forEach(function (payload) {
-      open.forEach(function (c) {
-        try { c.conn.send(payload); } catch (e) {}
-      });
-    });
-  }
-
-  function connectChat(force) {
-    if (isSpectator || !peer || peer.destroyed) return;
-    if (force) chatAttempts = 0;
-    if (chatAttempts >= 20) return;   // para de insistir sozinho depois de um tempo
-    if (chatConnecting) return;
-
-    var target = seatId(mySeat === 0 ? 1 : 0);
-    if (findChatConn(target)) return;
-
-    chatAttempts++;
-    chatConnecting = true;
-
-    var conn = null;
-    try {
-      conn = peer.connect(target, {
-        reliable: true,
-        serialization: "json",
-        metadata: { role: "participant" }
-      });
-    } catch (e) {
-      conn = null;
-    }
-
-    if (!conn) {
-      chatConnecting = false;
-      scheduleChatRetry();
-      return;
-    }
-
-    var settled = false;
-    var timer = setTimeout(function () {
-      if (settled) return;
-      settled = true;
-      chatConnecting = false;
-      try { conn.close(); } catch (e) {}
-      scheduleChatRetry();
-    }, 8000);
-
-    conn.on("open", function () {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      chatConnecting = false;
-      chatAttempts = 0;
-      addChatConn(conn);
-    });
-
-    conn.on("error", function () {
-      removeChatConn(conn);
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      chatConnecting = false;
-      scheduleChatRetry();
-    });
-  }
-
-  function scheduleChatRetry() {
-    if (isSpectator || !peer || peer.destroyed) return;
-    scheduleRetry(function () { connectChat(false); }, 4000);
-  }
-
-  function handleChatData(data) {
-    if (!data || typeof data.text !== "string") return;
-    var text = data.text.trim().slice(0, 500);
-    if (!text) return;
-
-    var id = data.id || ("txt:" + text);
-    if (seenMessages[id]) return;   // evita mensagem duplicada em conexões repetidas
-    seenMessages[id] = true;
-
-    appendMessage(text, false);
-  }
-
-  function sendChatText(raw) {
-    if (isSpectator) return;
-
-    var text = String(raw || "").trim().slice(0, 500);
-    if (!text) return;
-
-    var payload = { id: randomToken(), text: text };
-    seenMessages[payload.id] = true;
-    appendMessage(text, true);
-
-    var open = openChatConns();
-    if (!open.length) {
-      pendingChat.push(payload);
-      appendSystem("Sem conexão com a outra pessoa agora. A mensagem será enviada quando ela entrar.");
-      connectChat(true);
-      return;
-    }
-
-    open.forEach(function (c) {
-      try { c.conn.send(payload); } catch (e) {}
-    });
-  }
-
-  function appendMessage(text, mine) {
-    var node = document.createElement("div");
-    node.className = "msg" + (mine ? " mine" : "");
-    node.textContent = text;
-    chatLog.appendChild(node);
-    chatLog.scrollTop = chatLog.scrollHeight;
-
-    if (!mine && !chatOpen) {
-      chatUnread++;
-      updateChatButton();
-    }
-  }
-
-  function appendSystem(text) {
-    var node = document.createElement("div");
-    node.className = "msg sys";
-    node.textContent = text;
-    chatLog.appendChild(node);
-    chatLog.scrollTop = chatLog.scrollHeight;
-  }
-
-  function updateChatButton() {
-    if (isSpectator) return;
-    chatBtn.textContent = chatUnread > 0 ? "💬 Mensagens (" + chatUnread + ")" : "💬 Mensagens";
-  }
-
-  function setChatVisible(show) {
-    chatOpen = show;
-    chatPanel.hidden = !show;
-    if (show) {
-      chatUnread = 0;
-      updateChatButton();
-      chatLog.scrollTop = chatLog.scrollHeight;
-      if (!chatInput.disabled) {
-        try { chatInput.focus(); } catch (e) {}
-      }
-    }
-  }
-
-  /* ------------------------------------------------------------------ *
-   *  Qualidade da transmissão
-   * ------------------------------------------------------------------ */
-
-  function tuneSenders(call, maxKbps) {
-    if (!call) return;
-
-    function apply() {
-      var pc = call.peerConnection;
-      if (!pc || typeof pc.getSenders !== "function") return;
-
-      pc.getSenders().forEach(function (sender) {
-        if (!sender.track) return;
-        try {
-          var params = sender.getParameters();
-          if (!params.encodings || !params.encodings.length) {
-            params.encodings = [{}];
-          }
-          if (sender.track.kind === "video") {
-            try { params.degradationPreference = "balanced"; } catch (e) {}
-            params.encodings[0].maxBitrate = maxKbps * 1000;
-          } else if (sender.track.kind === "audio") {
-            params.encodings[0].maxBitrate = 64000;
-          }
-          var p = sender.setParameters(params);
-          if (p && p.catch) p.catch(function () {});
-        } catch (e) {}
-      });
-    }
-
-    // A conexão pode ainda não estar pronta no primeiro instante.
-    apply();
-    setTimeout(apply, 1200);
-  }
-
-  /* ------------------------------------------------------------------ *
-   *  Interface da chamada
-   * ------------------------------------------------------------------ */
-
-  function addTile(label, muted, allowFullscreen) {
-    var tile = document.createElement("div");
-    tile.className = "tile";
-
-    var video = document.createElement("video");
-    video.autoplay = true;
-    video.playsInline = true;
-    video.setAttribute("playsinline", "");
-    video.muted = !!muted;
-
-    var tag = document.createElement("span");
-    tag.className = "tag";
-    tag.textContent = label;
-
-    tile.appendChild(video);
-    tile.appendChild(tag);
-
-    // Botão de tela cheia em cada tela de vídeo.
-    if (allowFullscreen !== false) {
-      var fsBtn = document.createElement("button");
-      fsBtn.type = "button";
-      fsBtn.className = "fs";
-      fsBtn.title = "Tela cheia";
-      fsBtn.setAttribute("aria-label", "Ver esta tela em tela cheia");
-      fsBtn.textContent = "⛶";
-      fsBtn.addEventListener("click", function (event) {
-        event.stopPropagation();
-        toggleFullscreen(tile);
-      });
-      tile.appendChild(fsBtn);
-    }
-
-    grid.appendChild(tile);
-    syncGrid();
-    return tile;
-  }
-
-  function toggleFullscreen(tile) {
-    var doc = document;
-    var current = doc.fullscreenElement || doc.webkitFullscreenElement || doc.msFullscreenElement;
-
-    if (current) {
-      if (doc.exitFullscreen) doc.exitFullscreen();
-      else if (doc.webkitExitFullscreen) doc.webkitExitFullscreen();
-      else if (doc.msExitFullscreen) doc.msExitFullscreen();
-      return;
-    }
-
-    if (tile.requestFullscreen) {
-      var p = tile.requestFullscreen();
-      if (p && p.catch) p.catch(function () { fullscreenVideoFallback(tile); });
-    } else if (tile.webkitRequestFullscreen) {
-      tile.webkitRequestFullscreen();
-    } else if (tile.msRequestFullscreen) {
-      tile.msRequestFullscreen();
-    } else {
-      fullscreenVideoFallback(tile);
-    }
-  }
-
-  // iPhone/iPad: tela cheia só existe dentro do elemento de vídeo.
-  function fullscreenVideoFallback(tile) {
-    var video = tile.querySelector("video");
-    if (video && video.webkitEnterFullscreen) {
-      try { video.webkitEnterFullscreen(); } catch (e) {}
-    }
-  }
-
-  function attachStream(tile, stream) {
-    var video = tile.querySelector("video");
-    if (!video) return;
-    video.srcObject = stream;
-    var play = video.play();
-    if (play && play.catch) play.catch(function () {});
-  }
-
-  function addWaitingTile(title, subtitle) {
-    removeWaitingTiles();
-    var tile = document.createElement("div");
-    tile.className = "tile waiting-tile";
-    tile.innerHTML =
-      '<div class="waiting"><div class="spinner"></div>' +
-      "<div><strong>" + title + "</strong><br>" +
-      "<span style='font-size:12.5px;opacity:.8'>" + subtitle + "</span></div></div>";
-    grid.appendChild(tile);
-    syncGrid();
-    return tile;
-  }
-
-  function removeWaitingTiles() {
-    Array.prototype.forEach.call(
-      document.querySelectorAll(".waiting-tile"),
-      function (n) { n.remove(); }
-    );
-    syncGrid();
-  }
-
-  function removeSpectatorHints() {
-    Array.prototype.forEach.call(
-      document.querySelectorAll(".spectator-self .waiting"),
-      function (n) { n.remove(); }
-    );
-  }
-
-  function syncGrid() {
-    grid.classList.toggle("solo", grid.children.length <= 1);
-  }
-
-  function updateMicCamButtons() {
-    micBtn.textContent = micOn ? "🎙️ Microfone" : "🎙️ Mudo";
-    micBtn.classList.toggle("off", !micOn);
-    camBtn.textContent = camOn ? "🎥 Câmera" : "🎥 Câmera off";
-    camBtn.classList.toggle("off", !camOn);
-  }
-
-  function scheduleRetry(fn, delay) {
-    var id = setTimeout(function () {
-      retryTimers = retryTimers.filter(function (t) { return t !== id; });
-      if (peer && !peer.destroyed) fn();
-      else if (fn) fn();
-    }, delay);
-    retryTimers.push(id);
-  }
-
-  /* ------------------------------------------------------------------ *
-   *  Botões
-   * ------------------------------------------------------------------ */
-
-  joinBtn.addEventListener("click", joinRoom);
-
-  chatBtn.addEventListener("click", function () {
-    if (isSpectator) return;
-    setChatVisible(!chatOpen);
-  });
-
-  chatCloseBtn.addEventListener("click", function () {
-    setChatVisible(false);
-    chatBtn.focus();
-  });
-
-  chatForm.addEventListener("submit", function (event) {
-    event.preventDefault();
-    if (isSpectator) return;
-    sendChatText(chatInput.value);
-    chatInput.value = "";
-    chatInput.focus();
-  });
-
-  micBtn.addEventListener("click", function () {
-    if (!localStream) return;
-    micOn = !micOn;
-    localStream.getAudioTracks().forEach(function (t) { t.enabled = micOn; });
-    updateMicCamButtons();
-  });
-
-  camBtn.addEventListener("click", function () {
-    if (!localStream) return;
-    camOn = !camOn;
-    localStream.getVideoTracks().forEach(function (t) { t.enabled = camOn; });
-    updateMicCamButtons();
-  });
-
-  copyBtn.addEventListener("click", async function () {
-    var url = window.location.href;
-    var original = copyBtn.textContent;
-    try {
-      await navigator.clipboard.writeText(url);
-      copyBtn.textContent = "✅ Link copiado";
-    } catch (e) {
-      window.prompt("Copie o link da sala:", url);
-      copyBtn.textContent = "🔗 Link";
-    }
-    setTimeout(function () { copyBtn.textContent = original; }, 1800);
-  });
-
-  function leaveRoom() {
-    retryTimers.forEach(clearTimeout);
-    retryTimers = [];
-
-    watchStates = {};
-    connectingToHost = false;
-    viewerCalls = [];
-
-    chatConns.forEach(function (c) { try { c.conn.close(); } catch (e) {} });
-    chatConns = [];
-    pendingChat = [];
-
-    if (localStream) {
-      localStream.getTracks().forEach(function (t) { t.stop(); });
-      localStream = null;
-    }
-    try { peer.destroy(); } catch (e) {}
-    peer = null;
-  }
-
-  leaveBtn.addEventListener("click", function () {
-    leaveRoom();
-    window.location.reload();
-  });
-
-  window.addEventListener("pagehide", leaveRoom);
-  window.addEventListener("beforeunload", leaveRoom);
-
-  /* ------------------------------------------------------------------ *
-   *  Início
-   * ------------------------------------------------------------------ */
-
-  if (window.peerEngine) {
-    window.peerEngine.whenReady(engineReady);
-  } else if (typeof window.Peer !== "undefined") {
-    engineReady(true);
-  } else {
-    engineReady(false);
-  }
-})();
-</script>
-</body>
-</html>
+        // Erro desconhecido: deixa o timeout deci
