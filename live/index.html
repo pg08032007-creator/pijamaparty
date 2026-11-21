@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>PartyLives</title>
+<link rel="icon" type="image/x-icon" href="favicon.ico">
+<link rel="icon" type="image/png" sizes="64x64" href="favicon.png">
+<link rel="apple-touch-icon" href="logo.jpg">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+<div class="app-container">
+
+  <div id="splash-screen" class="screen active">
+    <img src="logo.jpg" alt="Lives Em Alta" class="logo-img" data-logo>
+  </div>
+
+  <div id="login-screen" class="screen">
+    <div class="login-content">
+      <img src="logo.jpg" alt="" class="logo-small" data-logo>
+      <h2>Bem-vindo(a)</h2>
+      <p>Crie seu nome de usuário para começar.</p>
+      <form id="login-form">
+        <div class="input-group">
+          <i class="fa-solid fa-user"></i>
+          <input type="text" id="username" placeholder="Nome de usuário" required maxlength="15" autocomplete="nickname">
+        </div>
+        <label class="checkbox-container">
+          <input type="checkbox" id="terms" aria-describedby="terms-error">
+          <span class="checkmark"></span>
+          <span>Eu aceito os Termos de Uso e a Política de Privacidade.</span>
+        </label>
+        <p id="terms-error" class="terms-error" role="alert" aria-live="polite" hidden>Você precisa aceitar os Termos de Uso e a Política de Privacidade para entrar.</p>
+        <button type="submit" class="btn-enter">Entrar na plataforma</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="main-app" class="screen">
+    <header class="header">
+      <h1>Lives Em Alta <i class="fa-solid fa-fire flame-icon"></i></h1>
+      <div class="user-badge" title="Usuário logado">
+        <i class="fa-solid fa-user"></i><span id="userNameDisplay">user</span>
+      </div>
+    </header>
+
+    <main class="main-content">
+      <div class="bg-glow"></div>
+      <div class="empty-state" id="emptyState">
+        <div class="icon-container floating"><i class="fa-solid fa-video-slash"></i></div>
+        <p id="emptyMsg">Nenhuma transmissão ao vivo no momento. Seja o primeiro a transmitir!</p>
+      </div>
+
+      <div class="live-card" id="liveCard" hidden>
+        <div class="live-thumb-wrapper">
+          <div class="live-thumb-blur" id="liveThumb"></div>
+          <div class="live-thumb-overlay">
+            <div class="live-badge"><span class="live-dot"></span> AO VIVO</div>
+            <div class="locked-icon"><i class="fa-solid fa-lock"></i></div>
+            <p class="lock-msg">Conteúdo protegido</p>
+          </div>
+        </div>
+        <div class="live-info">
+          <div class="live-host">
+            <div class="host-avatar"><i class="fa-solid fa-user"></i></div>
+            <div class="host-text">
+              <strong id="liveHostName">Host</strong>
+              <span class="live-sub"><span id="liveViewersCard">0</span> assistindo</span>
+            </div>
+          </div>
+          <button class="btn-watch" id="btnWatch"><i class="fa-solid fa-play"></i> Assistir</button>
+        </div>
+      </div>
+    </main>
+
+    <div class="floating-action-container">
+      <button class="btn-live" id="liveBtn" aria-label="Iniciar live"><i class="fa-solid fa-video"></i></button>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="startLiveModal">
+    <div class="modal">
+      <h2><i class="fa-solid fa-tower-broadcast"></i> Iniciar transmissão</h2>
+      <p>Defina uma senha para proteger o acesso à sua live. Câmera e microfone serão solicitados.</p>
+      <div class="input-group">
+        <i class="fa-solid fa-key"></i>
+        <input type="password" id="livePasswordInput" placeholder="Senha da live" maxlength="30">
+      </div>
+      <p class="error-msg" id="startError"></p>
+      <div class="modal-actions">
+        <button class="btn-secondary" id="cancelStartLive">Cancelar</button>
+        <button class="btn-primary" id="confirmStartLive">Começar live</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="unlockModal">
+    <div class="modal">
+      <h2><i class="fa-solid fa-lock"></i> Live protegida</h2>
+      <p>Digite a senha para assistir à transmissão.</p>
+      <div class="input-group">
+        <i class="fa-solid fa-key"></i>
+        <input type="password" id="unlockPasswordInput" placeholder="Senha de acesso" maxlength="30">
+      </div>
+      <p class="error-msg" id="unlockError"></p>
+      <a class="unlock-buy-link" href="https://www.pijamaparty.online/Lives/" target="_blank" rel="noopener noreferrer">Não tem a senha? Compre aqui</a>
+      <div class="modal-actions">
+        <button class="btn-secondary" id="cancelUnlock">Voltar</button>
+        <button class="btn-primary" id="confirmUnlock">Entrar</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="live-screen" class="screen">
+    <div class="live-header">
+      <div class="live-badge-big"><span class="live-dot"></span> AO VIVO</div>
+      <div class="live-viewers"><i class="fa-solid fa-eye"></i> <span id="viewerCount">0</span></div>
+      <button class="btn-close-live" id="closeLiveView" aria-label="Sair"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+
+    <div class="live-stage">
+      <div class="live-video">
+        <video id="liveVideo" autoplay playsinline muted></video>
+        <div class="video-placeholder" id="videoPlaceholder">
+          <i class="fa-solid fa-video"></i>
+          <p id="placeholderMsg">Conectando...</p>
+        </div>
+        <button class="btn-unmute" id="btnUnmute" hidden><i class="fa-solid fa-volume-xmark"></i> Ativar som</button>
+        <div class="net-status" id="netStatus" hidden></div>
+        <button class="fullscreen-toggle" id="toggleFullscreen" type="button" aria-label="Entrar em tela cheia" title="Tela cheia"><i class="fa-solid fa-expand"></i></button>
+        <button class="viewer-pip viewer-pip-top" id="viewerPip" type="button" title="Miniplayer" aria-label="Abrir miniplayer" hidden><i class="fa-solid fa-window-restore"></i></button>
+        <button class="chat-toggle" id="chatToggle" type="button" aria-label="Recolher chat" title="Recolher chat"><i class="fa-solid fa-chevron-down"></i></button>
+        <div class="chat-messages" id="chatMessages" aria-live="polite" aria-relevant="additions"></div>
+        <div class="reaction-floats" id="reactionFloats" aria-hidden="true"></div>
+        <section class="live-poll-card" id="livePollCard" hidden aria-live="polite">
+          <div class="poll-card-head" id="pollCardHead" title="Segure e arraste para mover a enquete"><strong id="pollQuestion"></strong><button class="poll-dismiss" id="pollDismiss" type="button" aria-label="Fechar enquete" title="Fechar enquete"><i class="fa-solid fa-xmark"></i></button></div>
+          <div class="poll-options" id="pollOptions"></div>
+          <div class="poll-foot" id="pollFoot"></div>
+        </section>
+      </div>
+      <div class="live-role-tag" id="liveRoleTag"></div>
+    </div>
+
+    <div class="live-footer">
+      <section class="live-chat" id="liveChat" aria-label="Enviar mensagem no chat">
+        <form class="chat-compose" id="chatForm">
+          <input id="chatInput" type="text" maxlength="300" autocomplete="off" placeholder="Escreva uma mensagem..." aria-label="Escreva uma mensagem">
+          <button type="submit" aria-label="Enviar mensagem" title="Enviar"><i class="fa-solid fa-paper-plane"></i></button>
+        </form>
+      </section>
+      <div class="live-tools" id="liveTools" hidden>
+        <div class="live-tools-center">
+          <div class="mobile-tools-menu" id="mobileToolsMenu">
+            <button class="tool-button mobile-tools-trigger" id="mobileToolsToggle" type="button"
+              aria-label="Abrir ferramentas da live" aria-expanded="false" aria-controls="mobileToolsPanel"
+              title="Ferramentas da live"><i class="fa-solid fa-ellipsis"></i></button>
+            <div class="mobile-tools-panel" id="mobileToolsPanel" aria-label="Ferramentas da live">
+              <button class="tool-button roulette-config" id="openRoulette" title="Configurar roleta" aria-label="Configurar roleta"><i class="fa-solid fa-gear"></i></button>
+              <button class="tool-button roulette-spin" id="spinRoulette" title="Girar roleta" aria-label="Girar roleta" hidden><i class="fa-solid fa-rotate"></i></button>
+              <button class="tool-button poll-create-button" id="openPoll" title="Criar enquete" aria-label="Criar enquete"><i class="fa-solid fa-square-poll-vertical"></i></button>
+              <button class="tool-button viewers-button" id="openViewers" title="Espectadores" aria-label="Espectadores"><i class="fa-solid fa-users"></i></button>
+            </div>
+          </div>
+        </div>
+        <div class="live-tools-media">
+          <button class="tool-button media-button" id="toggleMicrophone" title="Silenciar microfone" aria-label="Silenciar microfone"><i class="fa-solid fa-microphone"></i></button>
+          <button class="tool-button media-button" id="toggleCamera" title="Desligar câmera" aria-label="Desligar câmera"><i class="fa-solid fa-video"></i></button>
+          <button class="tool-button live-lock-button" id="toggleLiveLock" type="button" title="Trancar live" aria-label="Trancar live"><i class="fa-solid fa-lock-open"></i></button>
+        </div>
+      </div>
+      <div class="viewer-controls" id="viewerControls" hidden>
+        <div class="viewer-reactions" aria-label="Enviar reação">
+          <button type="button" data-reaction="❤️" aria-label="Enviar coração">❤️</button>
+          <button type="button" data-reaction="😂" aria-label="Enviar risada">😂</button>
+          <button type="button" data-reaction="🔥" aria-label="Enviar fogo">🔥</button>
+          <button type="button" data-reaction="🫦" aria-label="Enviar boca">🫦</button>
+          <button type="button" data-reaction="😍" aria-label="Enviar apaixonado">😍</button>
+        </div>
+        <div class="viewer-volume" title="Volume da transmissão"><button type="button" class="viewer-mute-button" id="viewerMute" aria-label="Silenciar áudio" title="Silenciar áudio"><i class="fa-solid fa-volume-high"></i></button><input id="viewerVolume" type="range" min="0" max="1" step="0.05" value="0.8" aria-label="Volume"></div>
+      </div>
+      <span class="live-footer-msg" id="footerMsg"></span>
+      <button class="btn-danger" id="btnEndLiveInside" hidden><i class="fa-solid fa-stop"></i> Encerrar</button>
+    </div>
+
+    <div class="feature-modal" id="rouletteModal">
+      <div class="feature-panel">
+        <button class="panel-close" data-close="rouletteModal" aria-label="Fechar">&times;</button>
+        <h2><i class="fa-solid fa-dharmachakra"></i> Criar roleta</h2>
+        <p class="panel-subtitle">Adicione opções e defina o peso de cada uma.</p>
+        <div class="roulette-list" id="rouletteList"></div>
+        <button class="add-option" id="addRouletteOption"><i class="fa-solid fa-plus"></i> Adicionar opção</button>
+        <button class="btn-primary full-button" id="saveRoulette">Criar roleta</button>
+      </div>
+    </div>
+
+    <div class="feature-modal" id="pollModal">
+      <div class="feature-panel">
+        <button class="panel-close" data-close="pollModal" aria-label="Fechar">&times;</button>
+        <h2><i class="fa-solid fa-square-poll-vertical"></i> Criar enquete</h2>
+        <p class="panel-subtitle">Faça uma pergunta para quem está assistindo.</p>
+        <label class="poll-label" for="pollQuestionInput">Pergunta</label>
+        <input class="poll-text-input" id="pollQuestionInput" maxlength="100" placeholder="O que vocês preferem?">
+        <div class="poll-create-options" id="pollCreateOptions">
+          <input class="poll-text-input" maxlength="50" placeholder="Opção 1">
+          <input class="poll-text-input" maxlength="50" placeholder="Opção 2">
+        </div>
+        <button class="add-option" id="addPollOption"><i class="fa-solid fa-plus"></i> Adicionar opção</button>
+        <div class="poll-modal-actions"><button class="btn-secondary" id="cancelPoll">Cancelar</button><button class="btn-primary" id="publishPoll">Publicar enquete</button></div>
+      </div>
+    </div>
+
+    <div class="feature-modal" id="viewersModal">
+      <div class="feature-panel">
+        <button class="panel-close" data-close="viewersModal" aria-label="Fechar">&times;</button>
+        <h2><i class="fa-solid fa-users"></i> Espectadores <span class="viewer-total" id="viewerTotal">0</span></h2>
+        <div class="spectator-list" id="spectatorList"></div>
+      </div>
+    </div>
+
+    <div class="modal-overlay ban-confirm-overlay" id="banConfirmModal" role="dialog" aria-modal="true" aria-labelledby="banConfirmTitle" aria-describedby="banConfirmDescription">
+      <div class="modal ban-confirm-modal">
+        <button class="ban-modal-close" id="cancelBanClose" type="button" aria-label="Fechar">&times;</button>
+        <div class="ban-confirm-heading">
+          <div class="ban-confirm-icon"><i class="fa-solid fa-user-slash"></i></div>
+          <div><span class="ban-eyebrow">CONTROLE DA TRANSMISSÃO</span><h2 id="banConfirmTitle">Banir espectador?</h2></div>
+        </div>
+        <p id="banConfirmDescription">Tem certeza que deseja remover <strong id="banTargetName">este espectador</strong> desta live?</p>
+        <div class="ban-confirm-note"><i class="fa-solid fa-circle-info"></i><span>Essa pessoa será desconectada e não poderá retornar a esta live.</span></div>
+        <div class="modal-actions ban-confirm-actions">
+          <button class="btn-secondary" id="cancelBan">Cancelar</button>
+          <button class="btn-ban-confirm" id="confirmBan"><i class="fa-solid fa-ban"></i> Banir</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay lock-confirm-overlay" id="lockConfirmModal" role="dialog" aria-modal="true" aria-labelledby="lockConfirmTitle" aria-describedby="lockConfirmDescription">
+      <div class="modal lock-confirm-modal">
+        <div class="lock-confirm-icon"><i class="fa-solid fa-lock"></i></div>
+        <span class="lock-confirm-eyebrow">CONTROLE DA TRANSMISSÃO</span>
+        <h2 id="lockConfirmTitle">Trancar a live?</h2>
+        <p id="lockConfirmDescription">Todos os espectadores perderão o acesso ao vídeo e precisarão digitar a senha para continuar assistindo.</p>
+        <div class="modal-actions lock-confirm-actions">
+          <button class="btn-secondary" id="cancelLockLive" type="button">Cancelar</button>
+          <button class="btn-lock-confirm" id="confirmLockLive" type="button"><i class="fa-solid fa-lock"></i> Trancar live</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay end-live-overlay" id="endLiveModal" role="dialog" aria-modal="true" aria-labelledby="endLiveTitle">
+      <div class="modal end-live-modal">
+        <div class="end-live-icon"><i class="fa-solid fa-triangle-exclamation"></i></div>
+        <h2 id="endLiveTitle">Encerrar transmissão?</h2>
+        <p>Todos os espectadores serão desconectados e a transmissão será finalizada.</p>
+        <div class="modal-actions">
+          <button class="btn-secondary" id="cancelEndLive">Continuar transmitindo</button>
+          <button class="btn-end-confirm" id="confirmEndLive"><i class="fa-solid fa-stop"></i> Encerrar live</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="roulette-stage" id="rouletteStage" hidden>
+      <button class="roulette-stage-close" id="closeRouletteStage" aria-label="Fechar roleta">&times;</button>
+      <canvas id="rouletteCanvas" width="420" height="420"></canvas>
+      <div class="roulette-pointer"></div>
+      <div class="roulette-result" id="rouletteResult" hidden></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.15.6/dist/livekit-client.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="script.js"></script>
+</body>
+</html>
